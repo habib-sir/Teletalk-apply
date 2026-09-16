@@ -1338,25 +1338,31 @@ function extractAddressTableFromRows(rows) {
   const out = {};
   const headerIdx = rows.findIndex((r) => {
     const t = r.words.map((w) => w.text).join(' ');
-    return /present\s*address/i.test(t) && /permanent\s*address/i.test(t);
+    return /(?:present\s*address|বর্তমান\s*ঠিকানা)/i.test(t) && /(?:permanent\s*address|স্থায়ী\s*ঠিকানা)/i.test(t);
   });
   if (headerIdx === -1) return out;
 
   const headerRow = rows[headerIdx];
-  const permWordIdx = headerRow.words.findIndex((w) => /^permanent$/i.test(w.text));
-  if (permWordIdx <= 0) return out;
-  const boundaryX =
-    headerRow.words[permWordIdx].x0 -
-    (headerRow.words[permWordIdx].x0 - headerRow.words[permWordIdx - 1].x1) / 2;
+  const permWordIdx = headerRow.words.findIndex((w) => /^(?:permanent|স্থায়ী)/i.test(w.text));
+  let boundaryX;
+  if (permWordIdx > 0) {
+    boundaryX =
+      headerRow.words[permWordIdx].x0 -
+      (headerRow.words[permWordIdx].x0 - headerRow.words[permWordIdx - 1].x1) / 2;
+  } else {
+    const minX = Math.min(...headerRow.words.map((w) => w.x0));
+    const maxX = Math.max(...headerRow.words.map((w) => w.x1));
+    boundaryX = (minX + maxX) / 2;
+  }
 
-  const addrRowRegex = /^(Care\s*Of|Vill|House|District|Upazila|Post\s*Office|Post\s*Code)/i;
+  const addrRowRegex = /(?:Care\s*Of|Care-Of|C\s*\/\s*O|প্রযত্নে|Vill|House|Road|Flat|District|Upazila|Thana|Post\s*Office|Post\s*Code|জেলা|উপজেলা|থানা|ডাকঘর|পোস্ট)/i;
   const subLabelPatterns = [
-    ['district', /^District\s*[:\-]?\s*(.+)/i],
-    ['upazila', /Upazila[^A-Za-z]*(?:P\.?S\.?)?\s*[:\-]?\s*(.+)/i],
-    ['post', /Post\s*Office\s*[:\-]?\s*(.+)/i],
-    ['postcode', /Post\s*Code\s*[:\-]?\s*(.+)/i],
-    ['address', /(?:Vill\/?\s*Road\/?)(?:\s*House\/?\s*Flat)?\s*[:\-]?\s*(.+)/i],
-    ['careOf', /Care\s*Of\s*[:\-]?\s*(.+)/i],
+    ['careOf', /(?:Care\s*Of|Care-Of|C\s*\/\s*O|প্রযত্নে)\s*[:\-–]?\s*(.+)/i],
+    ['district', /(?:District|জেলা)\s*[:\-–]?\s*(.+)/i],
+    ['upazila', /(?:Upazila|Thana|উপজেলা|থানা)[^A-Za-z\u0980-\u09FF]*(?:P\.?S\.?)?\s*[:\-–]?\s*(.+)/i],
+    ['post', /(?:Post\s*Office|Post|ডাকঘর)\s*[:\-–]?\s*(.+)/i],
+    ['postcode', /(?:Post\s*[- ]?Code|Postal\s*Code|পোস্ট\s*কোড)\s*[:\-–]?\s*(.+)/i],
+    ['address', /(?:Vill\/?\s*Road\/?|Village|Road|House|Flat|গ্রাম|রোড|বাসা|হোল্ডিং)[^\n:]*[:\-–]?\s*(.+)/i],
   ];
 
   const present = {};
@@ -1364,7 +1370,7 @@ function extractAddressTableFromRows(rows) {
   for (let i = headerIdx + 1; i < rows.length; i++) {
     const row = rows[i];
     const rowText = row.words.map((w) => w.text).join(' ');
-    if (/educat|examination/i.test(rowText)) break; // left the address block
+    if (/educat|examination|academic/i.test(rowText)) break; // left the address block
     if (!addrRowRegex.test(rowText)) continue;
 
     const leftText = row.words.filter((w) => w.x0 < boundaryX).map((w) => w.text).join(' ');
@@ -1377,16 +1383,29 @@ function extractAddressTableFromRows(rows) {
     }
   }
 
-  if (present.address) out.presentAddress = present.address;
-  if (present.district) out.presentDistrict = present.district;
-  if (present.upazila) out.presentUpazila = present.upazila;
-  if (present.post) out.presentPost = present.post;
-  if (present.postcode) out.presentPostcode = present.postcode;
-  if (permanent.address) out.permanentAddress = permanent.address;
-  if (permanent.district) out.permanentDistrict = permanent.district;
-  if (permanent.upazila) out.permanentUpazila = permanent.upazila;
-  if (permanent.post) out.permanentPost = permanent.post;
-  if (permanent.postcode) out.permanentPostcode = permanent.postcode;
+  const cleanVal = (v) => (v ? v.replace(/^[:\-–\s]+|[:\-–\s]+$/g, '').trim() : '');
+
+  if (present.careOf) out.presentCareOf = cleanVal(present.careOf);
+  if (present.address) out.presentAddress = cleanVal(present.address);
+  if (present.district) out.presentDistrict = cleanVal(present.district);
+  if (present.upazila) out.presentUpazila = cleanVal(present.upazila);
+  if (present.post) out.presentPost = cleanVal(present.post);
+  if (present.postcode) {
+    const pm = present.postcode.match(/\d{4}/);
+    out.presentPostcode = pm ? pm[0] : cleanVal(present.postcode);
+  }
+
+  if (permanent.careOf) out.permanentCareOf = cleanVal(permanent.careOf);
+  else if (out.presentCareOf) out.permanentCareOf = out.presentCareOf;
+
+  if (permanent.address) out.permanentAddress = cleanVal(permanent.address);
+  if (permanent.district) out.permanentDistrict = cleanVal(permanent.district);
+  if (permanent.upazila) out.permanentUpazila = cleanVal(permanent.upazila);
+  if (permanent.post) out.permanentPost = cleanVal(permanent.post);
+  if (permanent.postcode) {
+    const pm = permanent.postcode.match(/\d{4}/);
+    out.permanentPostcode = pm ? pm[0] : cleanVal(permanent.postcode);
+  }
 
   return out;
 }
@@ -1400,23 +1419,129 @@ function extractAddressTableFromRows(rows) {
  * @param {ReturnType<typeof groupWordsIntoRows>} rows
  * @returns {object} partial profile data (only fields that were found)
  */
+/**
+ * Known Bangladesh Education Boards
+ */
+const BD_BOARDS = [
+  { name: 'Dhaka', re: /\bdhaka\b/i },
+  { name: 'Rajshahi', re: /\brajshahi\b/i },
+  { name: 'Cumilla', re: /\b(?:cumilla|comilla)\b/i },
+  { name: 'Chattogram', re: /\b(?:chattogram|chittagong)\b/i },
+  { name: 'Barishal', re: /\b(?:barishal|barisal)\b/i },
+  { name: 'Sylhet', re: /\bsylhet\b/i },
+  { name: 'Dinajpur', re: /\bdinajpur\b/i },
+  { name: 'Jessore', re: /\b(?:jessore|jashore)\b/i },
+  { name: 'Mymensingh', re: /\bmymensingh\b/i },
+  { name: 'Madrasah', re: /\b(?:madrasah|madrasa|bmeb)\b/i },
+  { name: 'Technical', re: /\b(?:technical|bteb)\b/i },
+];
+
+/**
+ * Known Bangladesh Secondary/Higher Secondary Groups
+ */
+const BD_GROUPS = [
+  { name: 'Science', re: /\bscience\b/i },
+  { name: 'Business Studies', re: /\b(?:business\s*studies|commerce|business)\b/i },
+  { name: 'Humanities', re: /\b(?:humanities|arts)\b/i },
+  { name: 'Vocational', re: /\bvocational\b/i },
+  { name: 'General', re: /\bgeneral\b/i },
+];
+
+/**
+ * Known University Degree Subjects
+ */
+const BD_SUBJECTS = [
+  { name: 'Computer Science & Engineering', re: /\b(?:computer\s*science\s*(?:&|and)?\s*engineering|cse)\b/i },
+  { name: 'Electrical & Electronic Engineering', re: /\b(?:electrical\s*(?:&|and)?\s*electronic\s*engineering|eee)\b/i },
+  { name: 'Civil Engineering', re: /\bcivil\s*engineering\b/i },
+  { name: 'Mechanical Engineering', re: /\bmechanical\s*engineering\b/i },
+  { name: 'Software Engineering', re: /\bsoftware\s*engineering\b/i },
+  { name: 'Information Technology', re: /\binformation\s*technology\b/i },
+  { name: 'Physics', re: /\bphysics\b/i },
+  { name: 'Chemistry', re: /\bchemistry\b/i },
+  { name: 'Mathematics', re: /\b(?:applied\s*)?mathematics\b/i },
+  { name: 'Statistics', re: /\bstatistics\b/i },
+  { name: 'English', re: /\benglish\b/i },
+  { name: 'Bangla', re: /\b(?:bangla|bengali)\b/i },
+  { name: 'Economics', re: /\beconomics\b/i },
+  { name: 'Sociology', re: /\bsociology\b/i },
+  { name: 'Political Science', re: /\bpolitical\s*science\b/i },
+  { name: 'International Relations', re: /\binternational\s*relations\b/i },
+  { name: 'Public Administration', re: /\bpublic\s*administration\b/i },
+  { name: 'Accounting', re: /\b(?:accounting|accounting\s*&\s*information\s*systems|ais)\b/i },
+  { name: 'Finance', re: /\b(?:finance|finance\s*&\s*banking)\b/i },
+  { name: 'Management', re: /\bmanagement\b/i },
+  { name: 'Marketing', re: /\bmarketing\b/i },
+  { name: 'Law', re: /\b(?:law|ll\.?b|ll\.?m)\b/i },
+  { name: 'Pharmacy', re: /\bpharmacy\b/i },
+  { name: 'Biochemistry', re: /\bbiochemistry\b/i },
+  { name: 'Microbiology', re: /\bmicrobiology\b/i },
+  { name: 'Agriculture', re: /\bagriculture\b/i },
+  { name: 'Botany', re: /\bbotany\b/i },
+  { name: 'Zoology', re: /\bzoology\b/i },
+];
+
+/**
+ * Known Major Universities in Bangladesh
+ */
+const BD_UNIVERSITIES = [
+  { name: 'University of Dhaka', re: /\b(?:university\s*of\s*dhaka|dhaka\s*university|\bdu\b)\b/i },
+  { name: 'Bangladesh University of Engineering and Technology', re: /\b(?:buet|engineering\s*and\s*technology)\b/i },
+  { name: 'National University', re: /\bnational\s*university\b/i },
+  { name: 'University of Rajshahi', re: /\b(?:university\s*of\s*rajshahi|rajshahi\s*university|\bru\b)\b/i },
+  { name: 'University of Chittagong', re: /\b(?:university\s*of\s*chittagong|chittagong\s*university|\bcu\b)\b/i },
+  { name: 'Jahangirnagar University', re: /\b(?:jahangirnagar\s*university|\bju\b)\b/i },
+  { name: 'Shahjalal University of Science and Technology', re: /\b(?:shahjalal|sust)\b/i },
+  { name: 'Khulna University', re: /\b(?:khulna\s*university|\bku\b)\b/i },
+  { name: 'Islamic University', re: /\bislamic\s*university\b/i },
+  { name: 'BRAC University', re: /\bbrac\s*university\b/i },
+  { name: 'North South University', re: /\bnorth\s*south\s*university\b/i },
+  { name: 'Ahsanullah University of Science and Technology', re: /\b(?:ahsanullah|aust)\b/i },
+  { name: 'Daffodil International University', re: /\b(?:daffodil|diu)\b/i },
+  { name: 'American International University-Bangladesh', re: /\b(?:aiub|american\s*international)\b/i },
+  { name: 'Independent University, Bangladesh', re: /\b(?:iub|independent\s*university)\b/i },
+  { name: 'East West University', re: /\b(?:east\s*west\s*university|ewu)\b/i },
+  { name: 'United International University', re: /\b(?:united\s*international|uiu)\b/i },
+  { name: 'Bangladesh Open University', re: /\b(?:open\s*university|bou)\b/i },
+  { name: 'Chittagong University of Engineering & Technology', re: /\bcuet\b/i },
+  { name: 'Rajshahi University of Engineering & Technology', re: /\bruet\b/i },
+  { name: 'Khulna University of Engineering & Technology', re: /\bkuet\b/i },
+  { name: 'Dhaka University of Engineering & Technology', re: /\bduet\b/i },
+];
+
+/**
+ * Parses the Educational Info table (Examination | Board/University | Roll
+ * | Result | Group/Subject | Year | Duration). Both column-boundary bucketing
+ * and robust semantic entity extraction are used to ensure that fields are
+ * captured with high precision even when column spacing varies.
+ * @param {ReturnType<typeof groupWordsIntoRows>} rows
+ * @returns {object} partial profile data (only fields that were found)
+ */
 function extractEducationTableFromRows(rows) {
   const out = {};
+  if (!rows || rows.length === 0) return out;
+
   const headerIdx = rows.findIndex((r) => {
     const t = r.words.map((w) => w.text).join(' ');
-    return /examination/i.test(t) && /roll/i.test(t) && /result/i.test(t);
+    return (/examination|exam/i.test(t) && /roll/i.test(t)) ||
+           (/examination|exam/i.test(t) && /result|gpa|cgpa/i.test(t));
   });
-  if (headerIdx === -1) return out;
 
-  const headerWords = rows[headerIdx].words;
-  // Column boundary = midpoint between each header word and the next.
   const boundaries = [];
-  for (let i = 1; i < headerWords.length; i++) {
-    boundaries.push((headerWords[i - 1].x1 + headerWords[i].x0) / 2);
+  let colNames = [];
+
+  if (headerIdx !== -1) {
+    const headerWords = rows[headerIdx].words;
+    for (let i = 1; i < headerWords.length; i++) {
+      boundaries.push((headerWords[i - 1].x1 + headerWords[i].x0) / 2);
+    }
+    colNames = headerWords.map((w) => w.text.toLowerCase());
   }
-  const colNames = headerWords.map((w) => w.text.toLowerCase());
 
   function bucketRow(row) {
+    if (!boundaries.length || !colNames.length) {
+      return { exam: '', board: '', roll: '', result: '', group: '', year: '', duration: '' };
+    }
     const cells = colNames.map(() => []);
     for (const w of row.words) {
       let col = 0;
@@ -1429,56 +1554,172 @@ function extractEducationTableFromRows(rows) {
     };
     return {
       exam: cells[0] ? cells[0].join(' ').trim() : '',
-      board: cellFor((c) => c.includes('board') || c.includes('university')),
+      board: cellFor((c) => c.includes('board') || c.includes('university') || c.includes('inst')),
       roll: cellFor((c) => c.includes('roll')),
-      result: cellFor((c) => c.includes('result')),
-      group: cellFor((c) => c.includes('group') || c.includes('subject')),
-      year: cellFor((c) => c.includes('year')),
+      result: cellFor((c) => c.includes('result') || c.includes('gpa') || c.includes('grade')),
+      group: cellFor((c) => c.includes('group') || c.includes('subject') || c.includes('dept')),
+      year: cellFor((c) => c.includes('year') || c.includes('passing')),
       duration: cellFor((c) => c.includes('duration')),
     };
   }
 
-  const examRowMap = [
-    [/^s\.?\s*s\.?\s*c\.?$/i, 'ssc'],
-    [/^h\.?\s*s\.?\s*c\.?$/i, 'hsc'],
-    [/^honou?rs$/i, 'gra'],
-    [/^(?:b\.?\s*sc\.?|b\.?\s*a\.?|b\.?\s*b\.?\s*a\.?|bachelor)/i, 'gra'],
-    [/^m\.?\s*sc\.?$/i, 'mas'],
-    [/^(?:m\.?\s*a\.?|m\.?\s*b\.?\s*a\.?|master)/i, 'mas'],
-  ];
-
-  for (let i = headerIdx + 1; i < rows.length; i++) {
+  const startIdx = headerIdx !== -1 ? headerIdx + 1 : 0;
+  for (let i = startIdx; i < rows.length; i++) {
     const row = rows[i];
-    const firstWord = row.words[0] ? row.words[0].text : '';
-    if (/other\s*qualif|declare|signature/i.test(row.words.map((w) => w.text).join(' '))) break;
-    const match = examRowMap.find(([re]) => re.test(firstWord));
-    if (!match) continue;
-    const prefix = match[1];
+    const rowText = row.words.map((w) => w.text).join(' ');
+    if (/other\s*qualif|declare|signature/i.test(rowText)) break;
+
+    // Detect level prefix
+    let prefix = null;
+    if (/\b(?:s\.?\s*s\.?\s*c\.?|dakhil|secondary\s*school)\b/i.test(rowText)) {
+      prefix = 'ssc';
+    } else if (/\b(?:h\.?\s*s\.?\s*c\.?|alim|higher\s*secondary|diploma\s*in)\b/i.test(rowText)) {
+      prefix = 'hsc';
+    } else if (/\b(?:m\.?\s*sc|m\.?\s*a\b|m\.?\s*b\.?\s*a|m\.?\s*com|master|masters|kamil)\b/i.test(rowText)) {
+      prefix = 'mas';
+    } else if (/\b(?:b\.?\s*sc|b\.?\s*a\b|b\.?\s*b\.?\s*a|b\.?\s*com|bachelor|honou?rs|mbbs|fazil|graduation)\b/i.test(rowText)) {
+      prefix = 'gra';
+    }
+    if (!prefix) continue;
+
     const cell = bucketRow(row);
 
-    const resultMatch = cell.result.match(/(\d\.\d{1,2})/);
-    const yearMatch = cell.year.match(/(\d{4})/);
-    // Guard against Result-column overflow ("CGPA 3.43 (Out of 4)") leaking
-    // into the Group/Subject bucket when a cell's text runs wide — strip
-    // filler words and parentheses before picking the subject/group name.
-    const cleanedGroupText = cell.group
-      .replace(/\b(?:of|out|in|on|cgpa|gpa)\b/gi, '')
-      .replace(/[()0-9.]/g, '')
-      .trim();
-    const groupMatch = cleanedGroupText.match(/([A-Za-z]{3,30})/);
+    // 1. Exam Name
+    if (prefix === 'ssc') {
+      out.sscExam = /dakhil/i.test(rowText)
+        ? 'Dakhil'
+        : (/vocational/i.test(rowText)
+          ? 'S.S.C. (Vocational)'
+          : (/o[\s\-]level/i.test(rowText) ? 'O Level' : 'S.S.C'));
+    } else if (prefix === 'hsc') {
+      out.hscExam = /alim/i.test(rowText)
+        ? 'Alim'
+        : (/diploma/i.test(rowText)
+          ? 'Diploma in Engineering'
+          : (/bm/i.test(rowText)
+            ? 'H.S.C. (BM)'
+            : (/vocational/i.test(rowText)
+              ? 'H.S.C. (Vocational)'
+              : (/a[\s\-]level/i.test(rowText) ? 'A Level' : 'H.S.C'))));
+    } else if (prefix === 'gra') {
+      out.graExam = /engineering|cse|eee/i.test(rowText)
+        ? 'B.Sc (Engineering)'
+        : (/b\.?b\.?a/i.test(rowText)
+          ? 'B.B.A'
+          : (/b\.?a\b/i.test(rowText)
+            ? 'B.A (Honours)'
+            : (/b\.?com/i.test(rowText)
+              ? 'B.Com (Honours)'
+              : (/mbbs/i.test(rowText)
+                ? 'MBBS'
+                : (/honou?rs/i.test(rowText) ? 'Honours' : 'B.Sc (Honours)')))));
+      out.bachelor = 'Yes';
+    } else if (prefix === 'mas') {
+      out.masExam = /m\.?b\.?a/i.test(rowText)
+        ? 'M.B.A'
+        : (/m\.?a\b/i.test(rowText)
+          ? 'M.A'
+          : (/m\.?com/i.test(rowText) ? 'M.Com' : 'M.Sc'));
+      out.master = 'Yes';
+    }
 
-    if (cell.board) out[`${prefix}Board`] = cell.board.replace(/\s*\/\s*/g, '/');
-    if (cell.roll && /^\d{2,10}$/.test(cell.roll)) out[`${prefix}Roll`] = cell.roll;
-    if (resultMatch) out[`${prefix}Result`] = resultMatch[1];
-    if (groupMatch) out[`${prefix}Group`] = groupMatch[1];
-    if (yearMatch) out[`${prefix}Year`] = yearMatch[1];
-    if (cell.duration && /^\d{1,2}$/.test(cell.duration)) out[`${prefix}Duration`] = cell.duration;
-    // gra/mas also have an "institute"/"subject" naming in the profile
-    // schema (Board/University header serves double duty as institute name
-    // for Honors/Masters rows; Group/Subject serves double duty as subject).
-    if (prefix === 'gra' || prefix === 'mas') {
-      if (cell.board) out[`${prefix}Institute`] = cell.board;
-      if (groupMatch) out[`${prefix}Subject`] = groupMatch[1];
+    // 2. Passing Year
+    const yearMatch = (cell.year || rowText).match(/\b(19[7-9]\d|20[0-3]\d)\b/);
+    if (yearMatch) {
+      out[`${prefix}Year`] = yearMatch[1];
+    }
+
+    // 3. Roll Number
+    if (cell.roll && /^\d{4,10}$/.test(cell.roll.trim())) {
+      out[`${prefix}Roll`] = cell.roll.trim();
+    } else {
+      const allNums = (rowText.match(/\b\d{4,10}\b/g) || []).filter(
+        (n) => n !== (yearMatch ? yearMatch[1] : '')
+      );
+      if (allNums.length > 0) {
+        out[`${prefix}Roll`] = allNums[0];
+      }
+    }
+
+    // 4. Result & Result Type
+    const resultMatch =
+      (cell.result || rowText).match(/\b([2-5]\.\d{1,2})\b/) ||
+      (cell.result || rowText).match(/(\d\.\d{1,2})/);
+    if (resultMatch) {
+      out[`${prefix}Result`] = resultMatch[1];
+      if (prefix === 'ssc' || prefix === 'hsc') {
+        out[`${prefix}ResultType`] = 'GPA';
+      } else {
+        out[`${prefix}ResultType`] = 'CGPA(out of 4)';
+      }
+    } else if (/1st\s*div|first\s*division|first\s*class/i.test(rowText)) {
+      if (prefix === 'ssc' || prefix === 'hsc') {
+        out[`${prefix}ResultType`] = 'Division';
+        out[`${prefix}Result`] = '1st Division';
+      } else {
+        out[`${prefix}ResultType`] = 'First Class';
+        out[`${prefix}Result`] = 'First Class';
+      }
+    } else if (/2nd\s*div|second\s*division|second\s*class/i.test(rowText)) {
+      if (prefix === 'ssc' || prefix === 'hsc') {
+        out[`${prefix}ResultType`] = 'Division';
+        out[`${prefix}Result`] = '2nd Division';
+      } else {
+        out[`${prefix}ResultType`] = 'Second Class';
+        out[`${prefix}Result`] = 'Second Class';
+      }
+    }
+
+    // 5. Board / University / Institute
+    if (prefix === 'ssc' || prefix === 'hsc') {
+      const boardMatch = BD_BOARDS.find((b) => b.re.test(cell.board || rowText));
+      if (boardMatch) {
+        out[`${prefix}Board`] = boardMatch.name;
+      } else if (cell.board && cell.board.trim().length >= 3) {
+        out[`${prefix}Board`] = cell.board.trim();
+      }
+    } else {
+      const uniMatch = BD_UNIVERSITIES.find((u) => u.re.test(cell.board || rowText));
+      if (uniMatch) {
+        out[`${prefix}Institute`] = uniMatch.name;
+      } else if (cell.board && cell.board.trim().length >= 3) {
+        out[`${prefix}Institute`] = cell.board.trim();
+      } else {
+        const uniTextM = rowText.match(
+          /([A-Za-z\s]{4,40}(?:University|College|Institute)[A-Za-z\s]{0,20})/i
+        );
+        if (uniTextM) out[`${prefix}Institute`] = uniTextM[1].trim();
+      }
+    }
+
+    // 6. Group / Subject
+    if (prefix === 'ssc' || prefix === 'hsc') {
+      const groupMatch = BD_GROUPS.find((g) => g.re.test(cell.group || rowText));
+      if (groupMatch) {
+        out[`${prefix}Group`] = groupMatch.name;
+      } else if (cell.group && cell.group.trim().length >= 3) {
+        out[`${prefix}Group`] = cell.group.trim();
+      }
+    } else {
+      const subMatch = BD_SUBJECTS.find((s) => s.re.test(cell.group || rowText));
+      if (subMatch) {
+        out[`${prefix}Subject`] = subMatch.name;
+      } else if (cell.group && cell.group.trim().length >= 3) {
+        const cleaned = cell.group
+          .replace(/\b(?:cgpa|gpa|out\s*of|division)\b/gi, '')
+          .replace(/[()0-9.]/g, '')
+          .trim();
+        if (cleaned.length >= 3) out[`${prefix}Subject`] = cleaned;
+      }
+    }
+
+    // 7. Course Duration
+    if (prefix === 'gra') {
+      const durM = (cell.duration || rowText).match(/\b0?([345])\s*(?:year|yr|years)?\b/i);
+      out.graDuration = durM ? '0' + durM[1] : '04';
+    } else if (prefix === 'mas') {
+      const durM = (cell.duration || rowText).match(/\b0?([12])\s*(?:year|yr|years)?\b/i);
+      out.masDuration = durM ? '0' + durM[1] : '01';
     }
   }
 
@@ -1579,9 +1820,11 @@ async function extractTextFromPdfViaOcr(file, onProgress) {
 
 /**
  * Extracts all text content from a PDF file, entirely locally via PDF.js.
- * Also returns the loaded PDF document handle for embedded image extraction.
+ * Preserves bounding boxes, groups words into rows, reconstructs structured text lines,
+ * and parses multi-column address and education tables.
+ * Also returns the loaded PDF document handle and word bounding boxes.
  * @param {File} file
- * @returns {Promise<{text: string, pdf: any}>}
+ * @returns {Promise<{text: string, tableFields: object, allWords: Array<Array<object>>, pdf: any}>}
  */
 async function extractTextFromPdf(file) {
   ensurePdfJsConfigured();
@@ -1599,15 +1842,79 @@ async function extractTextFromPdf(file) {
   }
 
   const pageTexts = [];
+  const allWords = [];
+  let tableFields = {};
+  const RENDER_SCALE = 2; // Matches pageCanvases scale in extractMediaFromPdf
+
   for (let pageNum = 1; pageNum <= pdf.numPages; pageNum++) {
     const page = await pdf.getPage(pageNum);
+    const viewport = page.getViewport({ scale: RENDER_SCALE });
     const textContent = await page.getTextContent();
-    // Join items with spaces; PDF.js splits text into positioned fragments
-    // that don't include natural whitespace between them.
-    const pageText = textContent.items.map((item) => item.str).join(' ');
-    pageTexts.push(pageText);
+    const pageWords = [];
+
+    for (const item of textContent.items) {
+      const str = (item.str || '').trim();
+      if (!str) continue;
+
+      // Extract coordinates in the canvas viewport space (origin top-left)
+      const tx = item.transform[4];
+      const ty = item.transform[5];
+      const [vx, vy] = viewport.convertToViewportPoint(tx, ty);
+      const itemW = (item.width || 0) * RENDER_SCALE;
+      const itemH = Math.max(12, (item.height || Math.abs(item.transform[3]) || 12) * RENDER_SCALE);
+      const x0 = Math.max(0, vx);
+      const y0 = Math.max(0, vy - itemH);
+      const x1 = x0 + itemW;
+      const y1 = y0 + itemH;
+
+      // Break composite string into individual word tokens if space-separated
+      const tokens = str.split(/\s+/).filter(Boolean);
+      if (tokens.length > 1) {
+        const tokenW = itemW / tokens.length;
+        for (let ti = 0; ti < tokens.length; ti++) {
+          pageWords.push({
+            text: tokens[ti],
+            bbox: {
+              x0: Math.round(x0 + ti * tokenW),
+              y0: Math.round(y0),
+              x1: Math.round(x0 + (ti + 1) * tokenW),
+              y1: Math.round(y1),
+            },
+            confidence: 100,
+          });
+        }
+      } else {
+        pageWords.push({
+          text: str,
+          bbox: {
+            x0: Math.round(x0),
+            y0: Math.round(y0),
+            x1: Math.round(x1),
+            y1: Math.round(y1),
+          },
+          confidence: 100,
+        });
+      }
+    }
+
+    allWords.push(pageWords);
+
+    if (pageWords.length) {
+      const rows = groupWordsIntoRows(pageWords);
+      const reconstructed = rowsToLines(rows, viewport.width);
+      pageTexts.push(reconstructed || textContent.items.map((i) => i.str).join(' '));
+
+      tableFields = {
+        ...tableFields,
+        ...extractAddressTableFromRows(rows),
+        ...extractEducationTableFromRows(rows),
+      };
+    } else {
+      pageTexts.push(textContent.items.map((i) => i.str).join(' '));
+    }
   }
-  return { text: pageTexts.join('\n'), pdf };
+
+  return { text: pageTexts.join('\n'), tableFields, allWords, pdf };
 }
 
 /**
@@ -1699,16 +2006,21 @@ function extractFieldsFromText(text) {
   // --- Full name: prefer an explicit "Name:" label, else first non-empty line ---
   data.fullName = firstMatch(flat, [
     /(?:Applicant'?s?|Candidate'?s?)\s*Name\s*[:\-]\s*([A-Za-z.,' 	]{3,60})(?:\n|$)/i,
-    /(?:^|\n)\s*Name\s*[:\-]\s*([A-Za-z.,' 	]{3,60})(?:\n|$)/i,
-    /(?:^|\n)\s*Full\s*Name\s*[:\-]\s*([A-Za-z.,' 	]{3,60})(?:\n|$)/i
+    /(?:^|\n)\s*Full\s*Name\s*[:\-]\s*([A-Za-z.,' 	]{3,60})(?:\n|$)/i,
+    /(?:^|\n)\s*Name\s*[:\-]\s*([A-Za-z.,' 	]{3,60})(?:\n|$)/i
   ]) || (lines[0] && /^[A-Za-z.\s'-]{3,60}$/.test(lines[0]) ? lines[0] : null);
 
   data.fatherName = firstMatch(flat, [
-    /Father'?s?\s*Name\s*[:\-]\s*([A-Za-z.,' 	]{3,60})/i
+    /Father'?s?\s*(?:Full\s*)?Name\s*[:\-]\s*([A-Za-z.,' 	]{3,60})/i,
+    /Father\s*[:\-]\s*([A-Za-z.,' 	]{3,60})/i
   ]);
 
+  // --- Mother's Name (English) ---
   data.motherName = firstMatch(flat, [
-    /Mother'?s?\s*Name\s*[:\-]\s*([A-Za-z.,' 	]{3,60})/i
+    /(?:Mother'?s?\s*(?:Full\s*)?Name|Name\s*of\s*Mother|Mothers\s*Name)\s*(?:\([^\)]*(?:English|in\s*English)[^\)]*\))?\s*[:\-]\s*([A-Za-z.,' 	]{3,60})/i,
+    /Mother'?s?\s*Name\s*[:\-]\s*([A-Za-z.,' 	]{3,60})/i,
+    /Mother\s*[:\-]\s*([A-Za-z.,' 	]{3,60})/i,
+    new RegExp(`(?:মাতার\\s*নাম\\s*(?:\\([^\\)]*(?:ইংরেজি|English)[^\\)]*\\)))\\s*[:\\-]?\\s*([A-Za-z.,' 	]{3,60})`, 'i')
   ]);
 
   data.spouseName = firstMatch(flat, [
@@ -1716,81 +2028,129 @@ function extractFieldsFromText(text) {
     /(?:Husband|Wife)'?s?\s*Name\s*[:\-]\s*([A-Za-z.,' 	]{3,60})/i
   ]);
 
-  // --- Bangla-script name fields ---
-  // These forms print a Bangla line directly under each English name line
-  // (আবেদনকারীর নাম / পিতার নাম / মাতার নাম). Bangla text lives in the
-  // Unicode block \u0980-\u09FF; capture group allows Bangla letters,
-  // combining marks and spaces. Colons are stripped from the OCR words
-  // upstream, so the pattern doesn't require one.
+  // --- Full Name (Bangla) & Parents' Bangla Names ---
   const BN = '\\u0980-\\u09FF';
   data.nameBn = firstMatch(flat, [
-    new RegExp(`আবেদনকারীর\\s*নাম\\s*[:\\-]?\\s*([${BN}\\s]{3,60})(?:\\n|$)`, 'i')
+    new RegExp(`(?:Full\\s*Name|Name)\\s*\\((?:বাংলা|Bangla|Bengali)\\)\\s*[:\\-]?\\s*([${BN}.,' 	]{2,60})`, 'i'),
+    new RegExp(`(?:পূর্ণ|প্রার্থীর|আবেদনকারীর)?\\s*নাম\\s*\\((?:বাংলা)\\)\\s*[:\\-]?\\s*([${BN}.,' 	]{2,60})`, 'i'),
+    new RegExp(`(?:পূর্ণ|প্রার্থীর|আবেদনকারীর)\\s*নাম\\s*[:\\-]?\\s*([${BN}.,' 	]{2,60})`, 'i'),
+    new RegExp(`(?:^|\\n)\\s*নাম\\s*[:\\-]?\\s*([${BN}.,' 	]{2,60})`, 'i'),
+    new RegExp(`Name\\s*in\\s*Bangla\\s*[:\\-]?\\s*([${BN}.,' 	]{2,60})`, 'i'),
+    new RegExp(`Bangla\\s*Name\\s*[:\\-]?\\s*([${BN}.,' 	]{2,60})`, 'i')
   ]);
+  if (!data.nameBn) {
+    for (const l of lines) {
+      const bnChars = (l.match(/[\u0980-\u09FF]/g) || []).length;
+      if (bnChars >= 4 && bnChars > l.length * 0.6 && !/পিতা|মাতা|ঠিকানা|জেলা|পোস্ট|বিভাগ|পরীক্ষা|স্বাক্ষর|কোটা/i.test(l)) {
+        data.nameBn = l.replace(/^[:\-\s]+|[:\-\s]+$/g, '').trim();
+        break;
+      }
+    }
+  }
+
   data.fatherBn = firstMatch(flat, [
-    new RegExp(`পিতার\\s*নাম\\s*[:\\-]?\\s*([${BN}\\s]{3,60})(?:\\n|$)`, 'i')
+    new RegExp(`পিতার\\s*নাম\\s*[:\\-]?\\s*([${BN}.,' 	]{2,60})`, 'i'),
+    new RegExp(`Father'?s?\\s*Name\\s*\\((?:বাংলা|Bangla)\\)\\s*[:\\-]?\\s*([${BN}.,' 	]{2,60})`, 'i')
   ]);
   data.motherBn = firstMatch(flat, [
-    new RegExp(`মাতার\\s*নাম\\s*[:\\-]?\\s*([${BN}\\s]{3,60})(?:\\n|$)`, 'i')
+    new RegExp(`মাতার\\s*নাম\\s*[:\\-]?\\s*([${BN}.,' 	]{2,60})`, 'i'),
+    new RegExp(`Mother'?s?\\s*Name\\s*\\((?:বাংলা|Bangla)\\)\\s*[:\\-]?\\s*([${BN}.,' 	]{2,60})`, 'i')
   ]);
 
   // --- Date of birth ---
   const dobRaw = firstMatch(flat, [
     /Date\s*of\s*Birth\s*[:\-]\s*([0-9A-Za-z,\/\-\s]{6,25})/i,
     /D\.?O\.?B\.?\s*[:\-]\s*([0-9A-Za-z,\/\-\s]{6,25})/i,
-    /Birth\s*Date\s*[:\-]\s*([0-9A-Za-z,\/\-\s]{6,25})/i
+    /Birth\s*Date\s*[:\-]\s*([0-9A-Za-z,\/\-\s]{6,25})/i,
+    /জন্ম\s*(?:তারিখ|দিন)\s*[:\-]\s*([0-9A-Za-z,\/\-\s]{6,25})/i
   ]);
   const normalizedDob = normalizeDate(dobRaw);
   if (normalizedDob) data.dateOfBirth = normalizedDob;
 
   // --- Gender ---
   const genderRaw = firstMatch(flat, [
-    /Gender\s*[:\-]\s*(Male|Female|Other)/i,
-    /Sex\s*[:\-]\s*(Male|Female|Other)/i
+    /(?:Gender|Sex|লিঙ্গ)\s*[:\-\/]?\s*(Male|Female|Other|পুরুষ|মহিলা|অন্যান্য|M|F)\b/i,
+    /(?:Gender|Sex)\s*[:\-]?\s*\[(?:X|x|✓|v)\]\s*(Male|Female|Other)/i
   ]);
   if (genderRaw) {
-    data.gender = genderRaw[0].toUpperCase() + genderRaw.slice(1).toLowerCase();
+    const gLower = genderRaw.toLowerCase();
+    if (gLower === 'male' || gLower === 'm' || gLower === 'পুরুষ') {
+      data.gender = 'Male';
+    } else if (gLower === 'female' || gLower === 'f' || gLower === 'মহিলা') {
+      data.gender = 'Female';
+    } else {
+      data.gender = 'Other';
+    }
   }
 
   // --- Nationality ---
   data.nationality = firstMatch(flat, [
-    /Nationality\s*[:\-]\s*([A-Za-z 	]{4,30})/i
+    /Nationality\s*[:\-]\s*([A-Za-z 	]{4,30})/i,
+    /জাতীয়তা\s*[:\-]\s*([A-Za-z 	\u0980-\u09FF]{4,30})/i
   ]) || 'Bangladeshi';
 
   // --- Religion ---
   data.religion = firstMatch(flat, [
-    /Religion\s*[:\-]\s*([A-Za-z 	]{3,20})/i
+    /Religion\s*[:\-]\s*([A-Za-z 	]{3,20})/i,
+    /ধর্ম\s*[:\-]\s*([A-Za-z 	\u0980-\u09FF]{3,20})/i
   ]);
 
   // --- Marital status ---
   const maritalRaw = firstMatch(flat, [
-    /Marital\s*Status\s*[:\-]\s*(Married|Unmarried|Single|Divorced|Widowed)/i
+    /Marital\s*Status\s*[:\-]\s*(Married|Unmarried|Single|Divorced|Widowed)/i,
+    /বৈবাহিক\s*অবস্থা\s*[:\-]\s*(বিবাহিত|অবিবাহিত)/i
   ]);
   if (maritalRaw) {
-    const normalized = /single|unmarried/i.test(maritalRaw) ? 'Single' : maritalRaw;
-    data.maritalStatus = normalized[0].toUpperCase() + normalized.slice(1).toLowerCase();
+    if (/বিবাহিত/.test(maritalRaw) && !/অবিবাহিত/.test(maritalRaw)) {
+      data.maritalStatus = 'Married';
+    } else if (/অবিবাহিত/.test(maritalRaw) || /single|unmarried/i.test(maritalRaw)) {
+      data.maritalStatus = 'Single';
+    } else {
+      data.maritalStatus = maritalRaw[0].toUpperCase() + maritalRaw.slice(1).toLowerCase();
+    }
   }
 
   // --- Blood group ---
   data.bloodGroup = firstMatch(flat, [
-    /Blood\s*Group\s*[:\-]\s*(A\+|A-|B\+|B-|AB\+|AB-|O\+|O-)/i
+    /Blood\s*Group\s*[:\-]\s*(A\+|A-|B\+|B-|AB\+|AB-|O\+|O-)/i,
+    /রক্তের\s*গ্রুপ\s*[:\-]\s*(A\+|A-|B\+|B-|AB\+|AB-|O\+|O-)/i
   ]);
+
+  // --- Quota ---
+  data.quota = firstMatch(flat, [
+    /Quota\s*(?:Type)?\s*[:\-]\s*([A-Za-z0-9&/,\-\s\(\)\u0980-\u09FF]{3,50})(?:\n|$)/i,
+    /কোটা\s*[:\-]\s*([A-Za-z0-9&/,\-\s\(\)\u0980-\u09FF]{3,50})(?:\n|$)/i
+  ]);
+  if (data.quota && /^none|no|n\/a|not\s*applicable|general|non[\s\-]*quota$/i.test(data.quota.trim())) {
+    data.quota = 'Non Quota';
+  }
+
+  // --- Departmental Candidate Status ---
+  data.depStatus = firstMatch(flat, [
+    /Departmental\s*(?:Candidate)?\s*(?:Status)?\s*[:\-]\s*([A-Za-z0-9&/,\-\s\.\(\)\u0980-\u09FF]{3,60})(?:\n|$)/i,
+    /Dept\.?\s*(?:Candidate)?\s*(?:Status)?\s*[:\-]\s*([A-Za-z0-9&/,\-\s\.\(\)\u0980-\u09FF]{3,60})(?:\n|$)/i,
+    /বিভাগীয়\s*প্রার্থ(?:ী|ীর)?\s*(?:অবস্থা|স্ট্যাটাস)?\s*[:\-]\s*([A-Za-z0-9&/,\-\s\.\(\)\u0980-\u09FF]{3,60})(?:\n|$)/i
+  ]);
+  if (data.depStatus && /^none|no|n\/a|not\s*applicable$/i.test(data.depStatus.trim())) {
+    data.depStatus = 'None';
+  }
 
   // --- NID / birth reg / passport ---
   data.nidNo = firstMatch(flat, [
     /N\.?I\.?D\.?\s*(?:No\.?|Number)?\s*[:\-]\s*([0-9]{10,17})/i,
-    /National\s*ID\s*(?:No\.?)?\s*[:\-]\s*([0-9]{10,17})/i
+    /National\s*ID\s*(?:No\.?)?\s*[:\-]\s*([0-9]{10,17})/i,
+    /জাতীয়\s*পরিচয়পত্র\s*(?:নম্বর|নং)?\s*[:\-]\s*([0-9]{10,17})/i
   ]);
   if (data.nidNo) data.nidType = 'NID';
 
   data.birthRegNo = firstMatch(flat, [
-    /Birth\s*Reg(?:istration)?\.?\s*(?:No\.?)?\s*[:\-]\s*([0-9]{10,20})/i
+    /Birth\s*Reg(?:istration)?\.?\s*(?:No\.?)?\s*[:\-]\s*([0-9]{10,20})/i,
+    /জন্ম\s*নিবন্ধন\s*(?:নম্বর|নং)?\s*[:\-]\s*([0-9]{10,20})/i
   ]);
 
   data.passportNo = firstMatch(flat, [
     /Passport\s*(?:No\.?|Number|ID)?\s*[:\-]\s*([A-Z0-9]{6,12})/i
   ]);
-  // Some forms print "Passport ID : N/A" with no real number — don't keep a
-  // literal "N/A" as if it were a value.
   if (data.passportNo && /^n\W*a$/i.test(data.passportNo)) data.passportNo = null;
 
   // --- Contact info ---
@@ -1808,18 +2168,30 @@ function extractFieldsFromText(text) {
     /([A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,})/
   ]);
 
+  // --- Care Of ---
+  data.presentCareOf = firstMatch(flat, [
+    /Present\s*(?:Address\s*)?Care\s*Of\s*[:\-]\s*([A-Za-z0-9.,' \u0980-\u09FF]{2,60})/i,
+    /(?:Care\s*Of|C\/O|Careof)\s*[:\-]\s*([A-Za-z0-9.,' \u0980-\u09FF]{2,60})/i,
+    /অভিভাবক|প্রযোজ্য\s*[:\-]\s*([A-Za-z0-9.,' \u0980-\u09FF]{2,60})/i
+  ]);
+  data.permanentCareOf = firstMatch(flat, [
+    /Permanent\s*(?:Address\s*)?Care\s*Of\s*[:\-]\s*([A-Za-z0-9.,' \u0980-\u09FF]{2,60})/i
+  ]) || data.presentCareOf;
+
   // --- Address blocks ---
   data.presentAddress = firstMatch(flat, [
-    /Present\s*Address\s*[:\-]\s*([^\n]{5,120})/i
+    /Present\s*Address\s*[:\-]\s*([^\n]{5,120})/i,
+    /বর্তমান\s*ঠিকানা\s*[:\-]\s*([^\n]{5,120})/i
   ]);
   data.permanentAddress = firstMatch(flat, [
-    /Permanent\s*Address\s*[:\-]\s*([^\n]{5,120})/i
+    /Permanent\s*Address\s*[:\-]\s*([^\n]{5,120})/i,
+    /স্থায়ী\s*ঠিকানা\s*[:\-]\s*([^\n]{5,120})/i
   ]);
   data.presentDistrict = firstMatch(flat, [
-    /Present\s*(?:Address\s*)?District\s*[:\-]\s*([A-Za-z\s]{3,30})/i
+    /Present\s*(?:Address\s*)?District\s*[:\-]\s*([A-Za-z\s\u0980-\u09FF]{3,30})/i
   ]);
   data.permanentDistrict = firstMatch(flat, [
-    /Permanent\s*(?:Address\s*)?District\s*[:\-]\s*([A-Za-z\s]{3,30})/i
+    /Permanent\s*(?:Address\s*)?District\s*[:\-]\s*([A-Za-z\s\u0980-\u09FF]{3,30})/i
   ]);
   data.presentPostcode = firstMatch(flat, [
     /Present\s*(?:Address\s*)?Post\s*[- ]?Code\s*[:\-]\s*(\d{4})/i
@@ -1829,51 +2201,157 @@ function extractFieldsFromText(text) {
   ]);
 
   data.fatherOccupation = firstMatch(flat, [
-    /Father'?s?\s*Occupation\s*[:\-]\s*([A-Za-z 	]{3,40})/i
+    /Father'?s?\s*Occupation\s*[:\-]\s*([A-Za-z 	\u0980-\u09FF]{3,40})/i
   ]);
 
-  // --- SSC ---
-  data.sscBoard = firstMatch(flat, [/S\.?S\.?C\.?[^\n]*Board\s*[:\-]\s*([A-Za-z 	]{3,20})/i]);
-  data.sscYear = firstMatch(flat, [/S\.?S\.?C\.?[^\n]*(?:Year|Passing)\s*[:\-]\s*(\d{4})/i, /S\.?S\.?C\.?[^\n]{0,80}(?<!\d)((?:19|20)\d{2})(?!\d)/i]);
-  data.sscResult = firstMatch(flat, [/S\.?S\.?C\.?[^\n]*(?:GPA|Result|CGPA)\s*[:\-]\s*(\d\.\d{1,2})/i]);
-  data.sscRoll = firstMatch(flat, [/S\.?S\.?C\.?[^\n]*Roll\s*(?:No\.?)?\s*[:\-]\s*(\d{4,8})/i]);
-  data.sscGroup = firstMatch(flat, [/S\.?S\.?C\.?[^\n]*Group\s*[:\-]\s*(Science|Commerce|Arts|Humanities)/i]);
+  // --- SSC / Equivalent ---
+  data.sscExam = firstMatch(flat, [
+    /S\.?S\.?C\.?[^\n]*(?:Exam|Examination)\s*[:\-]\s*([A-Za-z\s\/\.]{3,30})/i,
+    /(?:Examination|Exam)\s*[:\-]\s*(S\.?S\.?C\.?|Dakhil|O[\s\-]?Level|S\.?S\.?C\.?\s*Vocational)/i
+  ]) || (flat.includes('S.S.C') || flat.includes('SSC') ? 'S.S.C' : (flat.includes('Dakhil') ? 'Dakhil' : null));
 
-  // --- HSC ---
-  data.hscBoard = firstMatch(flat, [/H\.?S\.?C\.?[^\n]*Board\s*[:\-]\s*([A-Za-z 	]{3,20})/i]);
-  data.hscYear = firstMatch(flat, [/H\.?S\.?C\.?[^\n]*(?:Year|Passing)\s*[:\-]\s*(\d{4})/i, /H\.?S\.?C\.?[^\n]{0,80}(?<!\d)((?:19|20)\d{2})(?!\d)/i]);
-  data.hscResult = firstMatch(flat, [/H\.?S\.?C\.?[^\n]*(?:GPA|Result|CGPA)\s*[:\-]\s*(\d\.\d{1,2})/i]);
-  data.hscRoll = firstMatch(flat, [/H\.?S\.?C\.?[^\n]*Roll\s*(?:No\.?)?\s*[:\-]\s*(\d{4,8})/i]);
-  data.hscGroup = firstMatch(flat, [/H\.?S\.?C\.?[^\n]*Group\s*[:\-]\s*(Science|Commerce|Arts|Humanities)/i]);
+  data.sscRoll = firstMatch(flat, [
+    /S\.?S\.?C\.?[^\n]*Roll\s*(?:No\.?)?\s*[:\-]\s*(\d{4,10})/i,
+    /Roll\s*(?:No\.?)?[^\n]{0,20}(?:SSC|S\.S\.C)[^\n]{0,20}[:\-]\s*(\d{4,10})/i
+  ]);
+
+  data.sscGroup = firstMatch(flat, [
+    /S\.?S\.?C\.?[^\n]*Group\s*[:\-]\s*([A-Za-z\s]{3,30})/i
+  ]);
+  if (!data.sscGroup) {
+    const sscGrpM = flat.match(/S\.?S\.?C\.?[^\n]*(Science|Commerce|Arts|Humanities|Business\s*Studies|Vocational)/i);
+    if (sscGrpM) data.sscGroup = sscGrpM[1];
+  }
+
+  data.sscBoard = firstMatch(flat, [
+    /S\.?S\.?C\.?[^\n]*Board\s*[:\-]\s*([A-Za-z\s]{3,25})/i
+  ]);
+
+  data.sscResult = firstMatch(flat, [
+    /S\.?S\.?C\.?[^\n]*(?:GPA|Result|CGPA)\s*[:\-]\s*(\d\.\d{1,2})/i,
+    /S\.?S\.?C\.?[^\n]*Result\s*[:\-]\s*([A-Za-z0-9\.\s]{3,20})/i
+  ]);
+
+  data.sscResultType = firstMatch(flat, [
+    /S\.?S\.?C\.?[^\n]*Result\s*Type\s*[:\-]\s*([A-Za-z0-9\(\)\s]{3,20})/i
+  ]) || (data.sscResult && /\d\.\d+/.test(data.sscResult) ? 'GPA' : (data.sscResult && /division|class/i.test(data.sscResult) ? 'Division' : null));
+
+  data.sscYear = firstMatch(flat, [
+    /S\.?S\.?C\.?[^\n]*(?:Passing\s*Year|Year)\s*[:\-]\s*(\d{4})/i,
+    /S\.?S\.?C\.?[^\n]{0,80}(?<!\d)((?:19|20)\d{2})(?!\d)/i
+  ]);
+
+  // --- HSC / Equivalent ---
+  data.hscExam = firstMatch(flat, [
+    /H\.?S\.?C\.?[^\n]*(?:Exam|Examination)\s*[:\-]\s*([A-Za-z\s\/\.]{3,30})/i,
+    /(?:Examination|Exam)\s*[:\-]\s*(H\.?S\.?C\.?|Alim|A[\s\-]?Level|H\.?S\.?C\.?\s*Vocational|Diploma)/i
+  ]) || (flat.includes('H.S.C') || flat.includes('HSC') ? 'H.S.C' : (flat.includes('Alim') ? 'Alim' : null));
+
+  data.hscRoll = firstMatch(flat, [
+    /H\.?S\.?C\.?[^\n]*Roll\s*(?:No\.?)?\s*[:\-]\s*(\d{4,10})/i
+  ]);
+
+  data.hscGroup = firstMatch(flat, [
+    /H\.?S\.?C\.?[^\n]*Group\s*[:\-]\s*([A-Za-z\s]{3,30})/i
+  ]);
+  if (!data.hscGroup) {
+    const hscGrpM = flat.match(/H\.?S\.?C\.?[^\n]*(Science|Commerce|Arts|Humanities|Business\s*Studies|Vocational)/i);
+    if (hscGrpM) data.hscGroup = hscGrpM[1];
+  }
+
+  data.hscBoard = firstMatch(flat, [
+    /H\.?S\.?C\.?[^\n]*Board\s*[:\-]\s*([A-Za-z\s]{3,25})/i
+  ]);
+
+  data.hscResult = firstMatch(flat, [
+    /H\.?S\.?C\.?[^\n]*(?:GPA|Result|CGPA)\s*[:\-]\s*(\d\.\d{1,2})/i,
+    /H\.?S\.?C\.?[^\n]*Result\s*[:\-]\s*([A-Za-z0-9\.\s]{3,20})/i
+  ]);
+
+  data.hscResultType = firstMatch(flat, [
+    /H\.?S\.?C\.?[^\n]*Result\s*Type\s*[:\-]\s*([A-Za-z0-9\(\)\s]{3,20})/i
+  ]) || (data.hscResult && /\d\.\d+/.test(data.hscResult) ? 'GPA' : (data.hscResult && /division|class/i.test(data.hscResult) ? 'Division' : null));
+
+  data.hscYear = firstMatch(flat, [
+    /H\.?S\.?C\.?[^\n]*(?:Passing\s*Year|Year)\s*[:\-]\s*(\d{4})/i,
+    /H\.?S\.?C\.?[^\n]{0,80}(?<!\d)((?:19|20)\d{2})(?!\d)/i
+  ]);
 
   // --- Graduation / Bachelor's ---
+  data.graExam = firstMatch(flat, [
+    /(?:Graduation|Bachelor'?s?)[^\n]*(?:Exam|Examination)\s*[:\-]\s*([A-Za-z\s\/\.]{3,40})/i,
+    /(?:Examination|Exam)[^\n]{0,20}[:\-]\s*(B\.?Sc\.?|B\.?A\.?|B\.?B\.?A\.?|B\.?Com\.?|B\.?S\.?S\.?|LL\.?B|MBBS|Bachelor[A-Za-z\s]*)/i
+  ]);
+  if (!data.graExam && /(?:B\.?Sc\.?|Bachelor|B\.?B\.?A\.?|B\.?A\b|Honours)/i.test(flat)) {
+    data.graExam = /engineering|cse|eee/i.test(flat)
+      ? 'B.Sc (Engineering)'
+      : (/b\.?b\.?a/i.test(flat)
+        ? 'B.B.A'
+        : (/b\.?a\b/i.test(flat) ? 'B.A (Honours)' : 'B.Sc (Honours)'));
+    data.bachelor = 'Yes';
+  }
+
   data.graInstitute = firstMatch(flat, [
     /(?:B\.?Sc\.?|B\.?A\.?|B\.?B\.?A\.?|Bachelor)[^\n]*(?:from|,)\s*([A-Za-z\s]{5,60}(?:University|College|Institute))/i,
     /Bachelor'?s?[^\n]*Institut(?:e|ion)\s*[:\-]\s*([A-Za-z\s]{5,60})/i
   ]);
+
   data.graSubject = firstMatch(flat, [
-    /(?:B\.?Sc\.?|Bachelor)[^\n]*in\s+([A-Za-z 	]{3,40})/i
-  ]);
-  data.graYear = firstMatch(flat, [
-    /(?:B\.?Sc\.?|Bachelor)[^\n]{0,60}(\d{4})/i
-  ]);
-  data.graResult = firstMatch(flat, [
-    /(?:B\.?Sc\.?|Bachelor)[^\n]*(?:CGPA|GPA)\s*[:\-]?\s*(\d\.\d{1,2})/i
+    /(?:B\.?Sc\.?|Bachelor)[^\n]*in\s+([A-Za-z 	]{3,40})/i,
+    /(?:Graduation|Bachelor)[^\n]*(?:Subject|Dept)\s*[:\-]\s*([A-Za-z 	]{3,40})/i
   ]);
 
+  data.graResult = firstMatch(flat, [
+    /(?:B\.?Sc\.?|Bachelor|Graduation)[^\n]*(?:CGPA|GPA)\s*[:\-]?\s*(\d\.\d{1,2})/i,
+    /(?:B\.?Sc\.?|Bachelor|Graduation)[^\n]*Result\s*[:\-]?\s*([A-Za-z0-9\.\s]{3,20})/i
+  ]);
+
+  data.graResultType = firstMatch(flat, [
+    /(?:Graduation|Bachelor'?s?)[^\n]*Result\s*Type\s*[:\-]\s*([A-Za-z0-9\(\)\s]{3,25})/i
+  ]) || (data.graResult && /\d\.\d+/.test(data.graResult) ? 'CGPA(out of 4)' : (data.graResult && /class|division/i.test(data.graResult) ? 'First Class' : null));
+
+  data.graYear = firstMatch(flat, [
+    /(?:B\.?Sc\.?|Bachelor|Graduation)[^\n]*(?:Passing\s*Year|Year)\s*[:\-]\s*(\d{4})/i,
+    /(?:B\.?Sc\.?|Bachelor)[^\n]{0,60}(\d{4})/i
+  ]);
+  data.graDuration = data.graDuration || '04';
+
   // --- Masters ---
+  data.masExam = firstMatch(flat, [
+    /(?:Masters?|Master'?s?)[^\n]*(?:Exam|Examination)\s*[:\-]\s*([A-Za-z\s\/\.]{3,40})/i,
+    /(?:Examination|Exam)[^\n]{0,20}[:\-]\s*(M\.?Sc\.?|M\.?A\.?|M\.?B\.?A\.?|M\.?Com\.?|M\.?S\.?S\.?|LL\.?M|Master[A-Za-z\s]*)/i
+  ]);
+  if (!data.masExam && /(?:M\.?Sc\.?|Master'?s?|M\.?B\.?A\.?|M\.?A\b)/i.test(flat)) {
+    data.masExam = /m\.?b\.?a/i.test(flat)
+      ? 'M.B.A'
+      : (/m\.?a\b/i.test(flat) ? 'M.A' : 'M.Sc');
+    data.master = 'Yes';
+  }
+
   data.masInstitute = firstMatch(flat, [
-    /(?:M\.?Sc\.?|M\.?A\.?|M\.?B\.?A\.?|Master'?s?)[^\n]*(?:from|,)\s*([A-Za-z\s]{5,60}(?:University|College|Institute))/i
+    /(?:M\.?Sc\.?|M\.?A\.?|M\.?B\.?A\.?|Master'?s?)[^\n]*(?:from|,)\s*([A-Za-z\s]{5,60}(?:University|College|Institute))/i,
+    /Master'?s?[^\n]*Institut(?:e|ion)\s*[:\-]\s*([A-Za-z\s]{5,60})/i
   ]);
+
   data.masSubject = firstMatch(flat, [
-    /(?:M\.?Sc\.?|Master'?s?)[^\n]*in\s+([A-Za-z 	]{3,40})/i
+    /(?:M\.?Sc\.?|Master'?s?)[^\n]*in\s+([A-Za-z 	]{3,40})/i,
+    /(?:Masters?|Master)[^\n]*(?:Subject|Dept)\s*[:\-]\s*([A-Za-z 	]{3,40})/i
   ]);
+
+  data.masResult = firstMatch(flat, [
+    /(?:M\.?Sc\.?|Master'?s?)[^\n]*(?:CGPA|GPA)\s*[:\-]?\s*(\d\.\d{1,2})/i,
+    /(?:M\.?Sc\.?|Master'?s?)[^\n]*Result\s*[:\-]?\s*([A-Za-z0-9\.\s]{3,20})/i
+  ]);
+
+  data.masResultType = firstMatch(flat, [
+    /(?:Masters?|Master'?s?)[^\n]*Result\s*Type\s*[:\-]\s*([A-Za-z0-9\(\)\s]{3,25})/i
+  ]) || (data.masResult && /\d\.\d+/.test(data.masResult) ? 'CGPA(out of 4)' : (data.masResult && /class|division/i.test(data.masResult) ? 'First Class' : null));
+
   data.masYear = firstMatch(flat, [
+    /(?:M\.?Sc\.?|Master'?s?)[^\n]*(?:Passing\s*Year|Year)\s*[:\-]\s*(\d{4})/i,
     /(?:M\.?Sc\.?|Master'?s?)[^\n]{0,60}(\d{4})/i
   ]);
-  data.masResult = firstMatch(flat, [
-    /(?:M\.?Sc\.?|Master'?s?)[^\n]*(?:CGPA|GPA)\s*[:\-]?\s*(\d\.\d{1,2})/i
-  ]);
+  data.masDuration = data.masDuration || '01';
 
   // --- Skills / experience flags (keyword presence, not labelled fields) ---
   data.experienceComputer = /computer\s*(?:literate|skills?|experience)/i.test(flat) ? 'Yes' : null;
@@ -2027,142 +2505,274 @@ function hasSignatureInk(canvas, threshold = 210, minDarkPixels = 40) {
 }
 
 /**
- * Crops the photo region from a document canvas.
- * In Bangladeshi application forms and CVs, the photo is typically in the
- * top-right quadrant (x: 56%-95%, y: 4%-34%).
+ * Crops the photo region from a document canvas using Human Face & Skin Tone recognition.
+ * If a human face is found, perfectly centers a 1:1 passport crop on the face and shoulders,
+ * eliminating outside text, form headers, and unwanted document margins.
+ *
  * @param {HTMLCanvasElement} canvas
+ * @param {Array<object>} [words]
  * @returns {HTMLCanvasElement|null}
  */
-function cropPhotoFromCanvas(canvas) {
+function cropPhotoFromCanvas(canvas, words = []) {
+  if (!canvas || !window.ImageTools) return null;
   const w = canvas.width;
   const h = canvas.height;
-  const rx = Math.round(w * 0.56);
-  const ry = Math.round(h * 0.04);
-  const rw = Math.round(w * 0.38);
-  const rh = Math.round(h * 0.30);
 
-  const ctx = canvas.getContext('2d');
-  const imgData = ctx.getImageData(rx, ry, rw, rh);
-  const d = imgData.data;
+  // 1. Primary: Search standard Bangladeshi job application photo quadrant: Top-Right (48% to 98% X, 1% to 42% Y)
+  const topRxZone = {
+    x: Math.round(w * 0.48),
+    y: Math.round(h * 0.01),
+    w: Math.round(w * 0.50),
+    h: Math.round(h * 0.42),
+  };
+  const trFace = window.ImageTools.detectFaceRegion(canvas, topRxZone, words);
+  if (trFace && trFace.faceFound && trFace.cropRect) {
+    const r = trFace.cropRect;
+    const cropCanvas = document.createElement('canvas');
+    cropCanvas.width = r.w;
+    cropCanvas.height = r.h;
+    cropCanvas.getContext('2d').drawImage(canvas, r.x, r.y, r.w, r.h, 0, 0, r.w, r.h);
+    cropCanvas._cropRect = r;
+    return cropCanvas;
+  }
 
-  // Background sample from top-left corner of the quadrant
-  const bgR = d[0], bgG = d[1], bgB = d[2];
-  let minX = rw, minY = rh, maxX = -1, maxY = -1;
-  let nonBgCount = 0;
+  // 2. Secondary: Search upper 65% of the document (covers Top-Left or centered photos)
+  const upperZone = {
+    x: 0,
+    y: 0,
+    w: w,
+    h: Math.round(h * 0.65),
+  };
+  const faceResult = window.ImageTools.detectFaceRegion(canvas, upperZone, words);
+  if (faceResult && faceResult.faceFound && faceResult.cropRect) {
+    const r = faceResult.cropRect;
+    const cropCanvas = document.createElement('canvas');
+    cropCanvas.width = r.w;
+    cropCanvas.height = r.h;
+    cropCanvas.getContext('2d').drawImage(
+      canvas,
+      r.x, r.y, r.w, r.h,
+      0, 0, r.w, r.h
+    );
+    cropCanvas._cropRect = r;
+    return cropCanvas;
+  }
 
-  for (let y = 0; y < rh; y++) {
-    for (let x = 0; x < rw; x++) {
-      const idx = (y * rw + x) * 4;
-      const diff = Math.abs(d[idx] - bgR) + Math.abs(d[idx + 1] - bgG) + Math.abs(d[idx + 2] - bgB);
-      if (diff > 35) {
-        nonBgCount++;
-        if (x < minX) minX = x;
-        if (x > maxX) maxX = x;
-        if (y < minY) minY = y;
-        if (y > maxY) maxY = y;
-      }
+  // 3. Fallback: Bounded candidate zones
+  const candidateZones = [
+    topRxZone,
+    { x: Math.round(w * 0.02), y: Math.round(h * 0.02), w: Math.round(w * 0.46), h: Math.round(h * 0.38) },
+  ];
+
+  for (const zone of candidateZones) {
+    const subFace = window.ImageTools.detectFaceRegion(canvas, zone, words);
+    if (subFace && subFace.faceFound && subFace.cropRect) {
+      const r = subFace.cropRect;
+      const cropCanvas = document.createElement('canvas');
+      cropCanvas.width = r.w;
+      cropCanvas.height = r.h;
+      cropCanvas.getContext('2d').drawImage(canvas, r.x, r.y, r.w, r.h, 0, 0, r.w, r.h);
+      cropCanvas._cropRect = r;
+      return cropCanvas;
     }
   }
 
-  // If a distinct bounded photo was detected
-  if (nonBgCount > 400 && maxX > minX + 40 && maxY > minY + 40) {
-    const cropW = maxX - minX + 1;
-    const cropH = maxY - minY + 1;
-    const cropCanvas = document.createElement('canvas');
-    cropCanvas.width = cropW;
-    cropCanvas.height = cropH;
-    cropCanvas.getContext('2d').drawImage(
-      canvas,
-      rx + minX, ry + minY, cropW, cropH,
-      0, 0, cropW, cropH
-    );
-    if (hasImageContent(cropCanvas, 12)) return cropCanvas;
+  // 4. Fallback: Bounded high-variance photo box (excluding uniform text blocks)
+  for (const zone of candidateZones) {
+    const testCanvas = document.createElement('canvas');
+    testCanvas.width = zone.w;
+    testCanvas.height = zone.h;
+    testCanvas.getContext('2d').drawImage(canvas, zone.x, zone.y, zone.w, zone.h, 0, 0, zone.w, zone.h);
+    if (hasImageContent(testCanvas, 18)) {
+      testCanvas._cropRect = zone;
+      return testCanvas;
+    }
   }
 
-  // Fallback to the full top-right candidate area
-  const fallbackCanvas = document.createElement('canvas');
-  fallbackCanvas.width = rw;
-  fallbackCanvas.height = rh;
-  fallbackCanvas.getContext('2d').drawImage(
-    canvas,
-    rx, ry, rw, rh,
-    0, 0, rw, rh
-  );
-  return hasImageContent(fallbackCanvas, 12) ? fallbackCanvas : null;
+  return null;
 }
 
 /**
- * Crops the signature region from a document canvas using OCR word boxes
- * or Teletalk's bottom-right signature quadrant.
+ * Crops the signature region from a document canvas using multi-zone keyword inspection,
+ * baseline detection, or cursive ink cluster analysis.
+ *
  * @param {HTMLCanvasElement} canvas
  * @param {Array<object>} [words]
  * @returns {HTMLCanvasElement|null}
  */
 function cropSignatureFromCanvas(canvas, words = []) {
+  if (!canvas || !window.ImageTools) return null;
   const w = canvas.width;
   const h = canvas.height;
 
-  let sigWordBox = null;
+  // 1. Keyword search across OCR words (English & Bengali)
+  const sigKeywords = ['signature', 'sign', 'applicant', 'candidate', 'স্বাক্ষর', 'দস্তখত', 'প্রার্থী', 'আবেদনকারী'];
+  const keywordBoxes = [];
+
   if (words && words.length) {
     for (const word of words) {
-      const txt = (word.text || '').toLowerCase();
-      if (
-        txt.includes('signature') ||
-        txt.includes('স্বাক্ষর') ||
-        txt.includes('দস্তখত') ||
-        (txt.includes('sign') && !txt.includes('design') && !txt.includes('assign'))
-      ) {
-        if (word.bbox && word.bbox.y0 > h * 0.48) {
-          sigWordBox = word.bbox;
-          break;
-        }
+      const txt = (word.text || '').toLowerCase().trim();
+      const isMatch = sigKeywords.some(kw => txt.includes(kw) && !txt.includes('design') && !txt.includes('assign'));
+      if (isMatch && word.bbox && word.bbox.y0 > h * 0.35) {
+        keywordBoxes.push(word.bbox);
       }
     }
   }
 
-  let cropX, cropY, cropW, cropH;
-  if (sigWordBox) {
-    const labelW = Math.max(70, sigWordBox.x1 - sigWordBox.x0);
-    cropX = Math.max(0, Math.round(sigWordBox.x0 - labelW * 0.4));
-    cropW = Math.min(w - cropX, Math.round(labelW * 2.8));
-    cropH = Math.min(sigWordBox.y0, Math.max(50, Math.round(labelW * 0.9)));
-    cropY = Math.max(0, Math.round(sigWordBox.y0 - cropH - 2));
-  } else {
-    // Standard bottom-right quadrant of Teletalk forms
-    cropX = Math.round(w * 0.50);
-    cropY = Math.round(h * 0.80);
-    cropW = Math.round(w * 0.45);
-    cropH = Math.round(h * 0.16);
+  for (const bbox of keywordBoxes) {
+    const kwW = Math.max(60, bbox.x1 - bbox.x0);
+    const kwH = Math.max(16, bbox.y1 - bbox.y0);
+
+    // Zone A: Above the keyword label (where candidates sign above "Signature of Applicant")
+    const zoneAbove = {
+      x: Math.max(0, Math.round(bbox.x0 - kwW * 0.6)),
+      y: Math.max(0, Math.round(bbox.y0 - Math.max(65, kwW * 1.2))),
+      w: Math.min(w, Math.round(kwW * 2.6)),
+      h: Math.round(Math.max(60, kwW * 1.2)),
+    };
+    const resAbove = window.ImageTools.detectSignatureRegion(canvas, zoneAbove);
+    if (resAbove && resAbove.inkCount >= 35) {
+      const c = document.createElement('canvas');
+      c.width = resAbove.w;
+      c.height = resAbove.h;
+      c.getContext('2d').drawImage(canvas, resAbove.x, resAbove.y, resAbove.w, resAbove.h, 0, 0, resAbove.w, resAbove.h);
+      c._cropRect = resAbove;
+      return c;
+    }
+
+    // Zone B: Below the keyword label (e.g. "Applicant's Signature:" with box below)
+    const zoneBelow = {
+      x: Math.max(0, Math.round(bbox.x0 - kwW * 0.3)),
+      y: Math.min(h - 40, Math.round(bbox.y1 + 4)),
+      w: Math.min(w, Math.round(kwW * 2.5)),
+      h: Math.round(Math.max(55, kwW * 1.0)),
+    };
+    const resBelow = window.ImageTools.detectSignatureRegion(canvas, zoneBelow);
+    if (resBelow && resBelow.inkCount >= 35) {
+      const c = document.createElement('canvas');
+      c.width = resBelow.w;
+      c.height = resBelow.h;
+      c.getContext('2d').drawImage(canvas, resBelow.x, resBelow.y, resBelow.w, resBelow.h, 0, 0, resBelow.w, resBelow.h);
+      c._cropRect = resBelow;
+      return c;
+    }
+
+    // Zone C: To the right of the keyword label (e.g. "Signature: [    ]")
+    const zoneRight = {
+      x: Math.min(w - 60, Math.round(bbox.x1 + 6)),
+      y: Math.max(0, Math.round(bbox.y0 - 20)),
+      w: Math.min(w - bbox.x1 - 6, Math.max(180, kwW * 2.2)),
+      h: Math.round(Math.max(50, kwH * 3.0)),
+    };
+    const resRight = window.ImageTools.detectSignatureRegion(canvas, zoneRight);
+    if (resRight && resRight.inkCount >= 35) {
+      const c = document.createElement('canvas');
+      c.width = resRight.w;
+      c.height = resRight.h;
+      c.getContext('2d').drawImage(canvas, resRight.x, resRight.y, resRight.w, resRight.h, 0, 0, resRight.w, resRight.h);
+      c._cropRect = resRight;
+      return c;
+    }
   }
 
-  const cropCanvas = document.createElement('canvas');
-  cropCanvas.width = cropW;
-  cropCanvas.height = cropH;
-  cropCanvas.getContext('2d').drawImage(
-    canvas,
-    cropX, cropY, cropW, cropH,
-    0, 0, cropW, cropH
-  );
+  // 2. Horizontal baseline / rule line search in lower 45% of page
+  try {
+    const ctx = canvas.getContext('2d');
+    const startY = Math.round(h * 0.52);
+    const checkH = Math.round(h * 0.44);
+    const sampleData = ctx.getImageData(0, startY, w, checkH).data;
 
-  return hasSignatureInk(cropCanvas, 220, 25) ? cropCanvas : null;
+    let bestLineY = -1;
+    let bestLineX0 = -1;
+    let bestLineLen = 0;
+
+    for (let ly = 10; ly < checkH - 10; ly += 3) {
+      let runLen = 0;
+      let runStart = 0;
+      for (let lx = 10; lx < w - 10; lx += 4) {
+        const idx = (ly * w + lx) * 4;
+        const lum = 0.299 * sampleData[idx] + 0.587 * sampleData[idx + 1] + 0.114 * sampleData[idx + 2];
+        if (lum < 160) {
+          if (runLen === 0) runStart = lx;
+          runLen += 4;
+        } else {
+          if (runLen > bestLineLen && runLen >= 60 && runLen <= 400) {
+            bestLineLen = runLen;
+            bestLineX0 = runStart;
+            bestLineY = startY + ly;
+          }
+          runLen = 0;
+        }
+      }
+    }
+
+    if (bestLineY > 0 && bestLineLen >= 60) {
+      const zoneLine = {
+        x: Math.max(0, bestLineX0 - 20),
+        y: Math.max(0, bestLineY - 85),
+        w: Math.min(w - bestLineX0, bestLineLen + 40),
+        h: 80,
+      };
+      const resLine = window.ImageTools.detectSignatureRegion(canvas, zoneLine);
+      if (resLine && resLine.inkCount >= 30) {
+        const c = document.createElement('canvas');
+        c.width = resLine.w;
+        c.height = resLine.h;
+        c.getContext('2d').drawImage(canvas, resLine.x, resLine.y, resLine.w, resLine.h, 0, 0, resLine.w, resLine.h);
+        c._cropRect = resLine;
+        return c;
+      }
+    }
+  } catch (lineErr) {
+    console.warn('Baseline search warning:', lineErr);
+  }
+
+  // 3. Fallback: Search candidate quadrants across the lower half of the document
+  const candidateQuadrants = [
+    // Bottom-Right (standard Teletalk applicant signature position)
+    { x: Math.round(w * 0.45), y: Math.round(h * 0.68), w: Math.round(w * 0.52), h: Math.round(h * 0.29) },
+    // Bottom-Left
+    { x: Math.round(w * 0.04), y: Math.round(h * 0.68), w: Math.round(w * 0.50), h: Math.round(h * 0.29) },
+    // Bottom-Center
+    { x: Math.round(w * 0.22), y: Math.round(h * 0.65), w: Math.round(w * 0.56), h: Math.round(h * 0.32) },
+    // Mid-Right (for single-page compact forms)
+    { x: Math.round(w * 0.45), y: Math.round(h * 0.45), w: Math.round(w * 0.52), h: Math.round(h * 0.25) },
+  ];
+
+  for (const quad of candidateQuadrants) {
+    const res = window.ImageTools.detectSignatureRegion(canvas, quad);
+    if (res && res.inkCount >= 35 && res.w >= 50 && res.h >= 15) {
+      const c = document.createElement('canvas');
+      c.width = res.w;
+      c.height = res.h;
+      c.getContext('2d').drawImage(canvas, res.x, res.y, res.w, res.h, 0, 0, res.w, res.h);
+      c._cropRect = res;
+      return c;
+    }
+  }
+
+  return null;
 }
 
 /**
  * Extracts passport photo (300x300px) and signature (300x80px) from a PDF.
- * Checks embedded XObjects first, then falls back to visual canvas detection.
+ * Checks embedded XObjects with face & ink validation, then falls back to visual canvas detection.
+ *
  * @param {object} pdf PDF.js document handle
  * @param {Array<HTMLCanvasElement>} [pageCanvases]
  * @param {Array<Array<object>>} [wordsList]
  * @param {(status: string) => void} [onProgress]
- * @returns {Promise<{photo: object|null, signature: object|null}>}
+ * @returns {Promise<{photo: object|null, signature: object|null, photoSourceCanvas: HTMLCanvasElement|null, signatureSourceCanvas: HTMLCanvasElement|null}>}
  */
 async function extractMediaFromPdf(pdf, pageCanvases = [], wordsList = [], onProgress) {
   let photo = null;
   let signature = null;
+  let photoSourceCanvas = null;
+  let signatureSourceCanvas = null;
 
   if (onProgress) onProgress('Scanning PDF for passport photo & signature...');
 
-  // 1. First attempt: embedded XObjects across pages
+  // 1. Scan embedded PDF images (XObjects) across all pages
   if (pdf && pdf.numPages) {
     try {
       const candidates = [];
@@ -2179,13 +2789,14 @@ async function extractMediaFromPdf(pdf, pageCanvases = [], wordsList = [], onPro
             try {
               const rawObj = await getPdfObject(page, objId);
               const imgCanvas = imageObjToCanvas(rawObj);
-              if (imgCanvas && imgCanvas.width >= 40 && imgCanvas.height >= 20) {
-                const ratio = imgCanvas.width / imgCanvas.height;
+              if (imgCanvas && imgCanvas.width >= 35 && imgCanvas.height >= 15) {
+                const skinRatio = window.ImageTools ? window.ImageTools.getSkinDensity(imgCanvas) : 0;
                 candidates.push({
                   canvas: imgCanvas,
                   width: imgCanvas.width,
                   height: imgCanvas.height,
-                  ratio,
+                  ratio: imgCanvas.width / imgCanvas.height,
+                  skinRatio,
                   pageNum: p,
                 });
               }
@@ -2194,29 +2805,35 @@ async function extractMediaFromPdf(pdf, pageCanvases = [], wordsList = [], onPro
         }
       }
 
-      // Identify photo candidate: ~1:1 square
+      // Identify Photo candidate: MUST have human skin tones (skinRatio >= 0.03) and size >= 55x55
       const photoCandidates = candidates.filter(
-        (c) => c.ratio >= 0.70 && c.ratio <= 1.45 && c.width >= 70 && c.height >= 70
+        (c) => c.skinRatio >= 0.03 && c.width >= 55 && c.height >= 55
       );
       photoCandidates.sort((a, b) => {
-        const diffA = Math.abs(a.ratio - 1.0);
-        const diffB = Math.abs(b.ratio - 1.0);
-        if (Math.abs(diffA - diffB) > 0.15) return diffA - diffB;
-        return (b.width * b.height) - (a.width * a.height);
+        const scoreA = a.skinRatio * 2 + (a.ratio >= 0.7 && a.ratio <= 1.4 ? 1 : 0);
+        const scoreB = b.skinRatio * 2 + (b.ratio >= 0.7 && b.ratio <= 1.4 ? 1 : 0);
+        return scoreB - scoreA;
       });
 
       if (photoCandidates.length > 0 && window.ImageTools) {
-        photo = await window.ImageTools.processPhotoCanvas(photoCandidates[0].canvas, {
+        const bestPhoto = photoCandidates[0];
+        photoSourceCanvas = bestPhoto.canvas;
+        photo = await window.ImageTools.processPhotoCanvas(bestPhoto.canvas, {
           targetW: 300,
           targetH: 300,
           maxKB: 100,
+          faceDetect: true,
         });
       }
 
-      // Identify signature candidate: ~3.75:1 wide rectangle (300/80 = 3.75)
-      const sigCandidates = candidates.filter(
-        (c) => c.ratio >= 1.8 && c.ratio <= 6.5 && c.width >= 90
-      );
+      // Identify Signature candidate:
+      // ZERO or negligible skin tones (skinRatio < 0.02), has distinct ink strokes, width >= 50, height >= 15
+      const sigCandidates = candidates.filter((c) => {
+        if (c.skinRatio >= 0.02) return false;
+        if (photoCandidates.length > 0 && c === photoCandidates[0]) return false;
+        return c.width >= 50 && c.height >= 15 && hasSignatureInk(c.canvas, 220, 20);
+      });
+
       sigCandidates.sort((a, b) => {
         const diffA = Math.abs(a.ratio - 3.75);
         const diffB = Math.abs(b.ratio - 3.75);
@@ -2224,18 +2841,20 @@ async function extractMediaFromPdf(pdf, pageCanvases = [], wordsList = [], onPro
       });
 
       if (sigCandidates.length > 0 && window.ImageTools) {
-        signature = await window.ImageTools.processSignatureCanvas(sigCandidates[0].canvas, {
+        const bestSig = sigCandidates[0];
+        signatureSourceCanvas = bestSig.canvas;
+        signature = await window.ImageTools.processSignatureCanvas(bestSig.canvas, {
           targetW: 300,
           targetH: 80,
           maxKB: 60,
         });
       }
     } catch (xErr) {
-      console.warn('XObject extraction warning:', xErr);
+      console.warn('XObject media extraction warning:', xErr);
     }
   }
 
-  // 2. Fallback: If either media is missing, render page canvases if not already rendered
+  // 2. Fallback: If either media is missing, render page canvases
   if ((!photo || !signature) && pdf && pdf.numPages) {
     if (!pageCanvases || pageCanvases.length === 0) {
       const RENDER_SCALE = 2;
@@ -2267,44 +2886,57 @@ async function extractMediaFromPdf(pdf, pageCanvases = [], wordsList = [], onPro
 
     if (!photo && firstCanvas && window.ImageTools) {
       try {
-        const crop = cropPhotoFromCanvas(firstCanvas);
+        const page1Words = (wordsList && wordsList[0]) || (wordsList || []).flat();
+        const crop = cropPhotoFromCanvas(firstCanvas, page1Words);
         if (crop) {
+          photoSourceCanvas = firstCanvas;
           photo = await window.ImageTools.processPhotoCanvas(crop, {
             targetW: 300,
             targetH: 300,
             maxKB: 100,
+            faceDetect: true,
           });
+          if (photo) photo._cropRect = crop._cropRect;
         }
       } catch (e) {
         console.warn('Visual photo detection error:', e);
       }
     }
 
-    if (!signature && lastCanvas && window.ImageTools) {
-      try {
-        const allWords = (wordsList || []).flat();
-        const crop = cropSignatureFromCanvas(lastCanvas, allWords);
-        if (crop) {
-          signature = await window.ImageTools.processSignatureCanvas(crop, {
-            targetW: 300,
-            targetH: 80,
-            maxKB: 60,
-          });
+    if (!signature && window.ImageTools) {
+      const pagesToCheck = [lastCanvas];
+      if (firstCanvas && firstCanvas !== lastCanvas) pagesToCheck.push(firstCanvas);
+
+      for (const pCanvas of pagesToCheck) {
+        if (!pCanvas) continue;
+        try {
+          const allWords = (wordsList || []).flat();
+          const crop = cropSignatureFromCanvas(pCanvas, allWords);
+          if (crop) {
+            signatureSourceCanvas = pCanvas;
+            signature = await window.ImageTools.processSignatureCanvas(crop, {
+              targetW: 300,
+              targetH: 80,
+              maxKB: 60,
+            });
+            if (signature) signature._cropRect = crop._cropRect;
+            break;
+          }
+        } catch (e) {
+          console.warn('Visual signature detection error:', e);
         }
-      } catch (e) {
-        console.warn('Visual signature detection error:', e);
       }
     }
   }
 
-  return { photo, signature };
+  return { photo, signature, photoSourceCanvas, signatureSourceCanvas };
 }
 
 /**
  * Extracts form fields, passport photo, and signature from an uploaded image file
  * @param {File} file
  * @param {(status: string) => void} [onProgress]
- * @returns {Promise<{fields: object, photo: object|null, signature: object|null}>}
+ * @returns {Promise<{fields: object, photo: object|null, signature: object|null, photoSourceCanvas: HTMLCanvasElement, signatureSourceCanvas: HTMLCanvasElement}>}
  */
 async function extractFromImage(file, onProgress) {
   ensureTesseractAvailable();
@@ -2349,18 +2981,20 @@ async function extractFromImage(file, onProgress) {
   const regexFields = extractFieldsFromText(reconstructed);
   const fields = { ...regexFields, ...tableFields };
 
-  if (onProgress) onProgress('Detecting photo and signature...');
+  if (onProgress) onProgress('Detecting photo & signature with human face analysis...');
   let photo = null;
   let signature = null;
 
   try {
-    const pCrop = cropPhotoFromCanvas(canvas);
+    const pCrop = cropPhotoFromCanvas(canvas, words);
     if (pCrop && window.ImageTools) {
       photo = await window.ImageTools.processPhotoCanvas(pCrop, {
         targetW: 300,
         targetH: 300,
         maxKB: 100,
+        faceDetect: true,
       });
+      if (photo) photo._cropRect = pCrop._cropRect;
     }
   } catch (e) {
     console.warn('Photo extraction from image failed:', e);
@@ -2374,12 +3008,19 @@ async function extractFromImage(file, onProgress) {
         targetH: 80,
         maxKB: 60,
       });
+      if (signature) signature._cropRect = sCrop._cropRect;
     }
   } catch (e) {
     console.warn('Signature extraction from image failed:', e);
   }
 
-  return { fields, photo, signature };
+  return {
+    fields,
+    photo,
+    signature,
+    photoSourceCanvas: canvas,
+    signatureSourceCanvas: canvas,
+  };
 }
 
 /**
@@ -2422,9 +3063,9 @@ async function extractCvData(file, onProgress) {
   const fields = { ...regexFields, ...tableFields };
 
   // Automated extraction of passport photo (300x300) and signature (300x80)
-  const { photo, signature } = await extractMediaFromPdf(pdf, pageCanvases, wordsList, onProgress);
+  const { photo, signature, photoSourceCanvas, signatureSourceCanvas } = await extractMediaFromPdf(pdf, pageCanvases, wordsList, onProgress);
 
-  return { fields, photo, signature };
+  return { fields, photo, signature, photoSourceCanvas, signatureSourceCanvas };
 }
 
 /** Populate the profile form with extracted data */
@@ -2497,7 +3138,7 @@ async function handleExtractCv() {
   extractCvBtn.disabled = true;
   setCvStatus('Extracting data, photo & signature offline... please wait.', '');
   try {
-    const { fields, photo, signature } = await extractCvData(file, (status) => setCvStatus(status, ''));
+    const { fields, photo, signature, photoSourceCanvas, signatureSourceCanvas } = await extractCvData(file, (status) => setCvStatus(status, ''));
     populateFormWithExtracted(fields);
 
     const activeProfileId = profileIdInput.value;
@@ -2505,11 +3146,23 @@ async function handleExtractCv() {
 
     if (photo && photo.base64 && window.ProfileCapture) {
       await window.ProfileCapture.saveProfilePhoto(activeProfileId, photo);
+      if (photoSourceCanvas) {
+        window.ProfileCapture.setActiveMediaSource(activeProfileId, 'photo', {
+          canvas: photoSourceCanvas,
+          rect: photo._cropRect,
+        });
+      }
       mediaList.push(`Passport Photo (300×300px, ${photo.kb} KB)`);
     }
 
     if (signature && signature.base64 && window.ProfileCapture) {
       await window.ProfileCapture.saveProfileSignature(activeProfileId, signature);
+      if (signatureSourceCanvas) {
+        window.ProfileCapture.setActiveMediaSource(activeProfileId, 'signature', {
+          canvas: signatureSourceCanvas,
+          rect: signature._cropRect,
+        });
+      }
       mediaList.push(`Signature (300×80px, ${signature.kb} KB)`);
     }
 
