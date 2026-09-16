@@ -1,0 +1,2548 @@
+/**
+ * Project: BD Job Autofill
+ * Module: Profiles Page Controller
+ * Purpose: Loads, renders, creates, updates, and deletes profiles via the
+ *          background message API, binding all profiles.html interactions.
+ * Author: Lead Engineer
+ * Version: 2.0.0 (Offline CV extraction — no network calls, no API key.
+ *          PDF text is parsed locally via vendored PDF.js and mapped to
+ *          profile fields using regex/keyword pattern matching.)
+ * Dependencies: background.js (message API), lib/pdfjs/pdf.min.js (vendored)
+ * Last Updated: 2026-07-09
+ */
+
+const TEXT_FIELD_KEYS = [
+  'name',
+  'fullName',
+  'nameBn',
+  'fatherName',
+  'fatherBn',
+  'motherName',
+  'motherBn',
+  'dateOfBirth',
+  'gender',
+  'nationality',
+  'religion',
+  'maritalStatus',
+  'spouseName',
+  'bloodGroup',
+  'nidType',
+  'nidNo',
+  'birthRegNo',
+  'passportNo',
+  'mobile',
+  'mobileConfirm',
+  'email',
+  'quota',
+  'quotaDetails',
+  'depStatus',
+  'presentCareOf',
+  'presentAddress',
+  'presentDistrict',
+  'presentUpazila',
+  'presentPost',
+  'presentPostcode',
+  'permanentCareOf',
+  'permanentAddress',
+  'permanentDistrict',
+  'permanentUpazila',
+  'permanentPost',
+  'permanentPostcode',
+  'fatherOccupation',
+  'sscExam',
+  'sscRoll',
+  'sscGroup',
+  'sscGroupOther',
+  'sscBoard',
+  'sscBoardOther',
+  'sscResultType',
+  'sscResult',
+  'sscYear',
+  'hscExam',
+  'hscRoll',
+  'hscGroup',
+  'hscGroupOther',
+  'hscBoard',
+  'hscBoardOther',
+  'hscResultType',
+  'hscResult',
+  'hscYear',
+  'graExam',
+  'graInstitute',
+  'graSubject',
+  'graResultType',
+  'graResult',
+  'graYear',
+  'graDuration',
+  'masExam',
+  'masInstitute',
+  'masSubject',
+  'masResultType',
+  'masResult',
+  'masYear',
+  'masDuration',
+  'bachelor',
+  'master',
+  'experienceComputer',
+  'experienceSatlipi'
+];
+
+const CHECKBOX_FIELD_KEYS = ['sameAsPresent'];
+
+const profileListEl = document.getElementById('profile-list');
+const profileListEmptyEl = document.getElementById('profile-list-empty');
+const profileFormEl = document.getElementById('profile-form');
+const formEmptyHintEl = document.getElementById('form-empty-hint');
+const formStatusEl = document.getElementById('form-status');
+const newProfileBtn = document.getElementById('new-profile-btn');
+const deleteProfileBtn = document.getElementById('delete-profile-btn');
+const deleteProfileTopBtn = document.getElementById('delete-profile-top-btn');
+const editorHeadingEl = document.getElementById('editor-heading');
+const deleteModalEl = document.getElementById('delete-modal');
+const modalProfileNameEl = document.getElementById('modal-profile-name');
+const modalCancelBtn = document.getElementById('modal-cancel-btn');
+const modalConfirmBtn = document.getElementById('modal-confirm-btn');
+const modalCloseXBtn = document.getElementById('modal-close-x-btn');
+const profileIdInput = document.getElementById('profile-id');
+const copyFromProfileSelect = document.getElementById('copy-from-profile-select');
+const copyFromProfileBtn = document.getElementById('copy-from-profile-btn');
+const importJsonInput = document.getElementById('import-json-input');
+const importJsonBtn = document.getElementById('import-json-btn');
+const importStatusEl = document.getElementById('import-status');
+const exportJsonBtn = document.getElementById('export-json-btn');
+const backupAllBtn = document.getElementById('backup-all-btn');
+
+// Production Search elements
+const profileSearchInput = document.getElementById('profile-search-input');
+const profileSearchBtn = document.getElementById('profile-search-btn');
+const profileSearchClearBtn = document.getElementById('profile-search-clear-btn');
+const profileSearchStatus = document.getElementById('profile-search-status');
+const profileSearchStatusText = document.getElementById('profile-search-status-text');
+const profileSearchResetLink = document.getElementById('profile-search-reset-link');
+const profileCountBadge = document.getElementById('profile-count-badge');
+const profileListNoMatchEl = document.getElementById('profile-list-no-match');
+
+const ALL_PROFILE_FIELD_KEYS = [...TEXT_FIELD_KEYS, ...CHECKBOX_FIELD_KEYS];
+
+let profiles = [];
+let selectedProfileId = null;
+let profileSearchQuery = '';
+let pendingImportFile = null;
+
+/**
+ * Sends a message to the background service worker.
+ * @param {string} type
+ * @param {any} [payload]
+ * @returns {Promise<any>}
+ */
+function sendMessage(type, payload) {
+  return new Promise((resolve, reject) => {
+    chrome.runtime.sendMessage({ type, payload }, (response) => {
+      if (chrome.runtime.lastError) {
+        reject(new Error(chrome.runtime.lastError.message));
+        return;
+      }
+      if (!response || !response.ok) {
+        reject(new Error((response && response.error) || 'Unknown error.'));
+        return;
+      }
+      resolve(response.data);
+    });
+  });
+}
+
+/**
+ * Generates a reasonably unique identifier for a new profile.
+ * @returns {string}
+ */
+function generateProfileId() {
+  return `profile_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+}
+
+/**
+ * Sets the form status line text and style.
+ * @param {string} message
+ * @param {'success'|'error'|''} tone
+ */
+function setFormStatus(message, tone) {
+  formStatusEl.textContent = message;
+  formStatusEl.className = 'form-status';
+  if (tone) {
+    formStatusEl.classList.add(`form-status--${tone}`);
+  }
+}
+
+/**
+ * Sets the import panel status line text and style.
+ * @param {string} message
+ * @param {'success'|'error'|''} tone
+ */
+function setImportStatus(message, tone) {
+  importStatusEl.textContent = message;
+  importStatusEl.className = 'form-status';
+  if (tone) {
+    importStatusEl.classList.add(`form-status--${tone}`);
+  }
+}
+
+let profilePendingDeletionId = null;
+
+/**
+ * Opens the in-app confirmation modal to delete a profile safely.
+ * @param {string} profileId
+ * @param {string} [profileName]
+ */
+function promptDeleteProfile(profileId, profileName) {
+  if (!profileId) return;
+  profilePendingDeletionId = profileId;
+  const targetProfile = profiles.find((p) => p.id === profileId);
+  const name = profileName || (targetProfile && targetProfile.name) || 'Unnamed profile';
+
+  if (modalProfileNameEl) {
+    modalProfileNameEl.textContent = `"${name}"`;
+  }
+  if (deleteModalEl) {
+    deleteModalEl.hidden = false;
+    deleteModalEl.classList.remove('is-hidden');
+    deleteModalEl.style.display = 'flex';
+  }
+}
+
+/**
+ * Closes the delete confirmation modal.
+ */
+function closeDeleteModal() {
+  profilePendingDeletionId = null;
+  if (deleteModalEl) {
+    deleteModalEl.hidden = true;
+    deleteModalEl.classList.add('is-hidden');
+    deleteModalEl.style.display = 'none';
+  }
+}
+
+/**
+ * Confirms and executes profile deletion via message API without using window.confirm.
+ */
+async function confirmDeleteProfile() {
+  const idToDelete = profilePendingDeletionId || selectedProfileId;
+  if (!idToDelete) {
+    closeDeleteModal();
+    return;
+  }
+
+  try {
+    profiles = await sendMessage('DELETE_PROFILE', idToDelete);
+    if (typeof window !== 'undefined' && window.ProfileCapture) {
+      window.ProfileCapture.deleteProfilePhoto(idToDelete).catch(() => {});
+      window.ProfileCapture.deleteProfileSignature(idToDelete).catch(() => {});
+    }
+    if (selectedProfileId === idToDelete) {
+      selectedProfileId = null;
+      profileFormEl.hidden = true;
+      formEmptyHintEl.hidden = false;
+    }
+    closeDeleteModal();
+    setFormStatus('Profile removed successfully.', 'success');
+    renderProfileList();
+  } catch (error) {
+    closeDeleteModal();
+    setFormStatus(error.message, 'error');
+  }
+}
+
+/**
+ * Normalizes phone numbers for flexible search (e.g. +88017... -> 017...).
+ */
+function normalizeSearchDigits(val) {
+  if (!val) return '';
+  return String(val).replace(/[^0-9]/g, '').replace(/^880/, '0');
+}
+
+/**
+ * Escapes HTML characters to prevent XSS.
+ */
+function escapeHtml(str) {
+  return String(str || '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
+/**
+ * Highlights matched query substring inside text.
+ */
+function highlightMatch(text, query) {
+  if (!text) return '';
+  const str = String(text);
+  if (!query || !query.trim()) return escapeHtml(str);
+  const q = query.trim();
+  const lowerText = str.toLowerCase();
+  const lowerQ = q.toLowerCase();
+  const idx = lowerText.indexOf(lowerQ);
+  if (idx === -1) return escapeHtml(str);
+  return `${escapeHtml(str.slice(0, idx))}<mark class="profile-item__highlight">${escapeHtml(str.slice(idx, idx + q.length))}</mark>${escapeHtml(str.slice(idx + q.length))}`;
+}
+
+/**
+ * Checks if a profile matches the search query (name, mobile, NID, etc.).
+ */
+function profileMatchesQuery(profile, query) {
+  if (!query || !query.trim()) return true;
+  const q = query.trim().toLowerCase();
+
+  // Name checks
+  const name = (profile.name || '').toLowerCase();
+  const fullName = (profile.fullName || '').toLowerCase();
+  const nameBn = (profile.nameBn || '').toLowerCase();
+  const fatherName = (profile.fatherName || '').toLowerCase();
+  const motherName = (profile.motherName || '').toLowerCase();
+  if (name.includes(q) || fullName.includes(q) || nameBn.includes(q) || fatherName.includes(q) || motherName.includes(q)) {
+    return true;
+  }
+
+  // Mobile checks
+  const qDigits = normalizeSearchDigits(q);
+  const mobile = normalizeSearchDigits(profile.mobile);
+  const mobileConfirm = normalizeSearchDigits(profile.mobileConfirm);
+  if (qDigits.length >= 2) {
+    if (mobile.includes(qDigits) || mobileConfirm.includes(qDigits)) {
+      return true;
+    }
+  }
+
+  // NID / Identification checks
+  const nid = (profile.nidNo || '').toLowerCase();
+  if (nid.includes(q)) {
+    return true;
+  }
+
+  // Email check
+  const email = (profile.email || '').toLowerCase();
+  if (email.includes(q)) {
+    return true;
+  }
+
+  return false;
+}
+
+/**
+ * Renders the profile list sidebar based on current profiles array and search query.
+ */
+function renderProfileList() {
+  profileListEl.innerHTML = '';
+
+  // Update total profile count badge
+  if (profileCountBadge) {
+    profileCountBadge.textContent = `${profiles.length} Profiles`;
+  }
+
+  const query = (profileSearchQuery || '').trim();
+  const filtered = profiles.filter((p) => profileMatchesQuery(p, query));
+
+  if (profileSearchClearBtn) {
+    profileSearchClearBtn.hidden = !query;
+  }
+
+  if (query) {
+    if (profileSearchStatus && profileSearchStatusText) {
+      profileSearchStatus.hidden = false;
+      profileSearchStatusText.textContent = `Found ${filtered.length} of ${profiles.length} profiles`;
+    }
+  } else {
+    if (profileSearchStatus) {
+      profileSearchStatus.hidden = true;
+    }
+  }
+
+  if (profiles.length === 0) {
+    profileListEmptyEl.hidden = false;
+    if (profileListNoMatchEl) profileListNoMatchEl.hidden = true;
+  } else if (filtered.length === 0) {
+    profileListEmptyEl.hidden = true;
+    if (profileListNoMatchEl) profileListNoMatchEl.hidden = false;
+  } else {
+    profileListEmptyEl.hidden = true;
+    if (profileListNoMatchEl) profileListNoMatchEl.hidden = true;
+
+    for (const profile of filtered) {
+      const li = document.createElement('li');
+      li.className = 'profile-list__item';
+      if (profile.id === selectedProfileId) {
+        li.classList.add('profile-list__item--active');
+      }
+
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.className = 'profile-list__button';
+      button.title = `${profile.name || 'Unnamed'}${profile.fullName ? ` (${profile.fullName})` : ''} - Click to edit`;
+
+      const maritalVal = (profile.maritalStatus && profile.maritalStatus.toLowerCase() === 'unmarried')
+        ? 'Single'
+        : (profile.maritalStatus || 'Single');
+      const isSingle = maritalVal.toLowerCase() === 'single';
+
+      const headerRow = document.createElement('div');
+      headerRow.className = 'profile-item__header-row';
+      headerRow.innerHTML = `
+        <span class="profile-item__name">${highlightMatch(profile.name || 'Unnamed', query)}</span>
+        <span class="profile-item__badge ${isSingle ? 'profile-item__badge--single' : 'profile-item__badge--married'}">${escapeHtml(maritalVal)}</span>
+      `;
+      button.appendChild(headerRow);
+
+      if (profile.fullName) {
+        const fullRow = document.createElement('div');
+        fullRow.className = 'profile-item__fullname';
+        fullRow.innerHTML = highlightMatch(profile.fullName, query);
+        button.appendChild(fullRow);
+      }
+
+      const metaRow = document.createElement('div');
+      metaRow.className = 'profile-item__meta-row';
+      const phoneText = profile.mobile ? `📱 ${highlightMatch(profile.mobile, query)}` : '📱 No mobile';
+      const nidText = profile.nidNo ? `• 🆔 ${highlightMatch(profile.nidNo, query)}` : '';
+      metaRow.innerHTML = `${phoneText} ${nidText}`;
+      button.appendChild(metaRow);
+
+      button.addEventListener('click', () => selectProfile(profile.id));
+      li.appendChild(button);
+
+      const delBtn = document.createElement('button');
+      delBtn.type = 'button';
+      delBtn.className = 'profile-list__delete-btn';
+      delBtn.title = `Delete profile "${profile.name || 'Unnamed'}"`;
+      delBtn.setAttribute('aria-label', `Delete profile ${profile.name || 'Unnamed'}`);
+      delBtn.innerHTML = '🗑️';
+      delBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        promptDeleteProfile(profile.id, profile.name);
+      });
+      li.appendChild(delBtn);
+
+      profileListEl.appendChild(li);
+    }
+  }
+
+  // Update export button state
+  if (exportJsonBtn) {
+    const active = profiles.find((p) => p.id === selectedProfileId);
+    if (active) {
+      exportJsonBtn.hidden = false;
+      exportJsonBtn.textContent = `Download "${active.name || 'Profile'}" (JSON)`;
+    } else {
+      exportJsonBtn.hidden = true;
+    }
+  }
+
+  renderCopyFromProfileOptions();
+}
+
+/**
+ * Populates the "copy from a saved profile" dropdown from the current
+ * profiles array, preserving the previously selected value if still valid.
+ */
+function renderCopyFromProfileOptions() {
+  const previousValue = copyFromProfileSelect.value;
+  copyFromProfileSelect.innerHTML = '<option value="">Select a profile…</option>';
+
+  for (const profile of profiles) {
+    const option = document.createElement('option');
+    option.value = profile.id;
+    const phonePart = profile.mobile ? ` (${profile.mobile})` : '';
+    option.textContent = `${profile.name || 'Unnamed profile'}${phonePart}`;
+    copyFromProfileSelect.appendChild(option);
+  }
+
+  if (profiles.some((p) => p.id === previousValue)) {
+    copyFromProfileSelect.value = previousValue;
+  }
+  copyFromProfileBtn.disabled = profiles.length === 0;
+}
+
+/**
+ * Populates the form fields with a given profile's data.
+ * @param {object} profile
+ */
+function populateForm(profile) {
+  profileIdInput.value = profile.id || '';
+
+  for (const key of TEXT_FIELD_KEYS) {
+    const input = document.getElementById(`field-${key}`);
+    if (!input) {
+      continue;
+    }
+    if (key === 'nationality' && !profile.id && profile[key] === undefined) {
+      input.value = 'Bangladeshi';
+      continue;
+    }
+    if (key === 'maritalStatus') {
+      const val = profile[key];
+      input.value = (val && val.toLowerCase() === 'unmarried') ? 'Single' : (val || '');
+      continue;
+    }
+    input.value = profile[key] || '';
+  }
+
+  for (const key of CHECKBOX_FIELD_KEYS) {
+    const input = document.getElementById(`field-${key}`);
+    if (input) {
+      input.checked = Boolean(profile[key]);
+    }
+  }
+
+  // Populate dynamic Custom Fields
+  const container = document.getElementById('custom-fields-container');
+  if (container) {
+    container.innerHTML = '';
+    if (profile && Array.isArray(profile.customFields)) {
+      profile.customFields.forEach(field => {
+        addCustomFieldRow(field.key, field.value);
+      });
+    }
+  }
+
+  // Initialize Photo & Signature Capture
+  if (typeof window !== 'undefined' && window.ProfileCapture) {
+    const activeProfileId = profile.id || profileIdInput.value;
+    if (activeProfileId) {
+      window.ProfileCapture.initPhotoCapture('#photoInput', '#photoPreview', activeProfileId);
+      window.ProfileCapture.initSignatureCapture('#sigInput', '#sigPreview', activeProfileId);
+    } else {
+      const photoPrev = document.getElementById('photoPreview');
+      const sigPrev = document.getElementById('sigPreview');
+      if (photoPrev) photoPrev.innerHTML = '<span class="capture-placeholder-text">Save profile or select file to crop</span>';
+      if (sigPrev) sigPrev.innerHTML = '<span class="capture-placeholder-text">Save profile or select file to scan</span>';
+    }
+  }
+}
+
+/**
+ * Reads current form field values into a profile object.
+ * @returns {object}
+ */
+function readFormData() {
+  const data = { id: profileIdInput.value || generateProfileId() };
+
+  for (const key of TEXT_FIELD_KEYS) {
+    const input = document.getElementById(`field-${key}`);
+    if (input) {
+      data[key] = input.value.trim();
+    }
+  }
+
+  for (const key of CHECKBOX_FIELD_KEYS) {
+    const input = document.getElementById(`field-${key}`);
+    if (input) {
+      data[key] = input.checked;
+    }
+  }
+
+  // Read dynamic Custom Fields
+  const customFields = [];
+  const rows = document.querySelectorAll('.custom-field-row');
+  rows.forEach(row => {
+    const keyInput = row.querySelector('.custom-field-key');
+    const valInput = row.querySelector('.custom-field-value');
+    if (keyInput && valInput) {
+      const key = keyInput.value.trim();
+      const value = valInput.value;
+      if (key) {
+        customFields.push({ key, value });
+      }
+    }
+  });
+  data.customFields = customFields;
+
+  if (data.maritalStatus && data.maritalStatus.toLowerCase() === 'unmarried') {
+    data.maritalStatus = 'Single';
+  }
+
+  return data;
+}
+
+/**
+ * Selects a profile by id, populating the form for editing.
+ * @param {string} profileId
+ */
+function selectProfile(profileId) {
+  const profile = profiles.find((p) => p.id === profileId);
+  if (!profile) {
+    return;
+  }
+
+  selectedProfileId = profileId;
+  formEmptyHintEl.hidden = true;
+  profileFormEl.hidden = false;
+  if (deleteProfileBtn) deleteProfileBtn.hidden = false;
+  if (deleteProfileTopBtn) deleteProfileTopBtn.hidden = false;
+  if (editorHeadingEl) editorHeadingEl.textContent = `Edit Profile: ${profile.name || 'Unnamed'}`;
+  setFormStatus('', '');
+  populateForm(profile);
+  renderProfileList();
+}
+
+/**
+ * Prepares the form for creating a new profile.
+ */
+function startNewProfile() {
+  const newId = generateProfileId();
+  selectedProfileId = null;
+  formEmptyHintEl.hidden = true;
+  profileFormEl.hidden = false;
+  if (deleteProfileBtn) deleteProfileBtn.hidden = true;
+  if (deleteProfileTopBtn) deleteProfileTopBtn.hidden = true;
+  if (editorHeadingEl) editorHeadingEl.textContent = 'Create New Profile';
+  setFormStatus('', '');
+  populateForm({ id: newId });
+  renderProfileList();
+  document.getElementById('field-name').focus();
+}
+
+/**
+ * Handles profile form submission: validates and saves via message API.
+ * @param {SubmitEvent} event
+ */
+async function handleFormSubmit(event) {
+  event.preventDefault();
+
+  const name = document.getElementById('field-name').value.trim();
+  if (!name) {
+    setFormStatus('Profile label is required.', 'error');
+    return;
+  }
+
+  const data = readFormData();
+
+  try {
+    profiles = await sendMessage('SAVE_PROFILE', data);
+    selectedProfileId = data.id;
+    setFormStatus('Profile saved.', 'success');
+    renderProfileList();
+    if (deleteProfileBtn) deleteProfileBtn.hidden = false;
+    if (deleteProfileTopBtn) deleteProfileTopBtn.hidden = false;
+    if (editorHeadingEl) editorHeadingEl.textContent = `Edit Profile: ${data.name || 'Unnamed'}`;
+  } catch (error) {
+    setFormStatus(error.message, 'error');
+  }
+}
+
+/**
+ * Handles delete button click: confirms and removes the selected profile using in-app modal.
+ */
+function handleDeleteClick() {
+  if (!selectedProfileId) {
+    return;
+  }
+  const current = profiles.find((p) => p.id === selectedProfileId);
+  promptDeleteProfile(selectedProfileId, current ? current.name : '');
+}
+
+/**
+ * Handles the "same as present address" checkbox: copies present address
+ * fields into permanent address fields and disables permanent inputs.
+ */
+function handleSameAsPresentChange() {
+  const checkbox = document.getElementById('field-sameAsPresent');
+  const mapping = {
+    presentCareOf: 'permanentCareOf',
+    presentAddress: 'permanentAddress',
+    presentDistrict: 'permanentDistrict',
+    presentUpazila: 'permanentUpazila',
+    presentPost: 'permanentPost',
+    presentPostcode: 'permanentPostcode'
+  };
+
+  for (const [sourceKey, targetKey] of Object.entries(mapping)) {
+    const sourceInput = document.getElementById(`field-${sourceKey}`);
+    const targetInput = document.getElementById(`field-${targetKey}`);
+    if (!sourceInput || !targetInput) {
+      continue;
+    }
+    if (checkbox.checked) {
+      targetInput.value = sourceInput.value;
+      targetInput.disabled = true;
+    } else {
+      targetInput.disabled = false;
+    }
+  }
+}
+
+/**
+ * Returns a sample profile object based on the data from the provided
+ * "Save Document - Study Online Bd.html" file, now with values that match
+ * the BSDB Teletalk form options exactly.
+ * @returns {object}
+ */
+function getSampleProfileData() {
+  return {
+    id: '',
+    name: 'Habib',
+    fullName: 'MD. HABIBUR RAHMAN',
+    nameBn: 'মোঃ হাবিবুর রহমান',
+    fatherName: 'MD. ABDUS SOBAHAN',
+    fatherBn: 'মোঃ আব্দুস সোবহান',
+    motherName: 'MST. HAMIDA BEGUM',
+    motherBn: 'মোছাঃ হামিদা বেগম',
+    dateOfBirth: '1994-12-20',
+    gender: 'Male',
+    nationality: 'Bangladeshi',
+    religion: 'Islam',
+    maritalStatus: 'Married',
+    spouseName: 'MST. SADIYA AKHTER',
+    bloodGroup: '',
+    nidType: 'NID',
+    nidNo: '3254367778',
+    birthRegNo: '',
+    passportNo: '',
+    mobile: '01771522503',
+    mobileConfirm: '01771522503',
+    email: 'habiblinkage@gmail.com',
+    quota: 'Not Applicable',
+    quotaDetails: '',
+    depStatus: 'Not Applicable',
+    presentCareOf: 'MD. ABDUS SOBAHAN',
+    presentAddress: 'SHOHORDIGHI UTTAR PARA',
+    presentDistrict: '10',
+    presentUpazila: '43',
+    presentPost: 'FAPORE',
+    presentPostcode: '5800',
+    permanentCareOf: 'MD. ABDUS SOBAHAN',
+    permanentAddress: 'SHOHORDIGHI UTTAR PARA',
+    permanentDistrict: '10',
+    permanentUpazila: '43',
+    permanentPost: 'FAPORE',
+    permanentPostcode: '5800',
+    sameAsPresent: true,
+    fatherOccupation: '',
+    sscExam: 'S.S.C',
+    sscRoll: '124300',
+    sscGroup: 'Science',
+    sscGroupOther: '',
+    sscBoard: 'Rajshahi',
+    sscBoardOther: '',
+    sscResultType: 'GPA(out of 5)',
+    sscResult: '4.38',
+    sscYear: '2010',
+    hscExam: 'H.S.C',
+    hscRoll: '130381',
+    hscGroup: 'Science',
+    hscGroupOther: '',
+    hscBoard: 'Rajshahi',
+    hscBoardOther: '',
+    hscResultType: 'GPA(out of 5)',
+    hscResult: '4.50',
+    hscYear: '2012',
+    graExam: 'Honors',
+    graInstitute: 'National University',
+    graSubject: 'Zoology',
+    graResultType: 'CGPA(out of 4)',
+    graResult: '3.43',
+    graYear: '2016',
+    graDuration: '04',
+    masExam: 'Masters',
+    masInstitute: 'National University',
+    masSubject: 'Zoology',
+    masResultType: 'CGPA(out of 4)',
+    masResult: '3.61',
+    masYear: '2017',
+    masDuration: '01',
+    bachelor: 'B.Sc (Honors) in Zoology, National University, 2016, CGPA 3.43',
+    master: 'M.Sc in Zoology, National University, 2017, CGPA 3.61',
+    experienceComputer: 'Yes',
+    experienceSatlipi: 'Yes',
+    customFields: [
+      { key: 'Height (Inches)', value: '68' },
+      { key: 'Weight (KG)', value: '65' }
+    ]
+  };
+}
+
+/**
+ * Dynamically appends a custom field row to the profile form.
+ * @param {string} [key]
+ * @param {string} [value]
+ */
+function addCustomFieldRow(key = '', value = '') {
+  const container = document.getElementById('custom-fields-container');
+  if (!container) return;
+
+  const row = document.createElement('div');
+  row.className = 'custom-field-row';
+  row.style.display = 'flex';
+  row.style.gap = 'var(--spacing-sm)';
+  row.style.alignItems = 'center';
+  row.style.marginTop = 'var(--spacing-xs)';
+
+  const keyInput = document.createElement('input');
+  keyInput.type = 'text';
+  keyInput.className = 'custom-field-key';
+  keyInput.placeholder = 'Key/Label (e.g. Height)';
+  keyInput.value = key;
+  keyInput.style.flex = '1';
+  keyInput.style.padding = 'var(--spacing-sm)';
+  keyInput.style.border = '1px solid var(--color-border)';
+  keyInput.style.borderRadius = 'var(--radius)';
+  keyInput.style.fontSize = '13px';
+
+  const valueInput = document.createElement('input');
+  valueInput.type = 'text';
+  valueInput.className = 'custom-field-value';
+  valueInput.placeholder = 'Value';
+  valueInput.value = value;
+  valueInput.style.flex = '1';
+  valueInput.style.padding = 'var(--spacing-sm)';
+  valueInput.style.border = '1px solid var(--color-border)';
+  valueInput.style.borderRadius = 'var(--radius)';
+  valueInput.style.fontSize = '13px';
+
+  const removeBtn = document.createElement('button');
+  removeBtn.type = 'button';
+  removeBtn.className = 'button button--danger remove-custom-field-btn';
+  removeBtn.textContent = 'Remove';
+  removeBtn.style.padding = 'var(--spacing-sm) var(--spacing-md)';
+  removeBtn.style.fontSize = '13px';
+  removeBtn.style.lineHeight = '1.2';
+  removeBtn.style.margin = '0';
+  removeBtn.style.minHeight = '34px';
+  removeBtn.style.width = 'auto';
+  removeBtn.addEventListener('click', () => {
+    row.remove();
+  });
+
+  row.appendChild(keyInput);
+  row.appendChild(valueInput);
+  row.appendChild(removeBtn);
+  container.appendChild(row);
+}
+
+/**
+ * Loads all profiles from storage on page initialization and auto-migrates legacy values.
+ * @returns {Promise<void>}
+ */
+async function initialize() {
+  closeDeleteModal();
+  try {
+    profiles = await sendMessage('GET_PROFILES');
+    if (!Array.isArray(profiles)) {
+      profiles = [];
+    }
+
+    // Auto-migrate legacy 'Unmarried' to 'Single' in stored profiles
+    for (const p of profiles) {
+      if (p && p.maritalStatus && p.maritalStatus.toLowerCase() === 'unmarried') {
+        p.maritalStatus = 'Single';
+        try {
+          await sendMessage('SAVE_PROFILE', p);
+        } catch (e) {
+          console.warn('Could not auto-migrate profile maritalStatus:', e);
+        }
+      }
+    }
+
+    renderProfileList();
+    if (!profiles || profiles.length === 0) {
+      startNewProfile();
+    }
+  } catch (error) {
+    setFormStatus(error.message, 'error');
+  }
+}
+
+// --- Event Listeners ---
+
+if (newProfileBtn) newProfileBtn.addEventListener('click', startNewProfile);
+if (profileFormEl) profileFormEl.addEventListener('submit', handleFormSubmit);
+if (deleteProfileBtn) deleteProfileBtn.addEventListener('click', handleDeleteClick);
+if (deleteProfileTopBtn) deleteProfileTopBtn.addEventListener('click', handleDeleteClick);
+if (modalCancelBtn) {
+  modalCancelBtn.addEventListener('click', (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    closeDeleteModal();
+  });
+}
+if (modalCloseXBtn) {
+  modalCloseXBtn.addEventListener('click', (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    closeDeleteModal();
+  });
+}
+if (modalConfirmBtn) {
+  modalConfirmBtn.addEventListener('click', (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    confirmDeleteProfile();
+  });
+}
+if (deleteModalEl) {
+  deleteModalEl.addEventListener('click', (e) => {
+    if (e.target === deleteModalEl) {
+      closeDeleteModal();
+    }
+  });
+}
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && deleteModalEl && !deleteModalEl.hidden && deleteModalEl.style.display !== 'none') {
+    closeDeleteModal();
+  }
+});
+const sameAsPresentCheckbox = document.getElementById('field-sameAsPresent');
+if (sameAsPresentCheckbox) {
+  sameAsPresentCheckbox.addEventListener('change', handleSameAsPresentChange);
+} else {
+  console.warn('profiles.js: #field-sameAsPresent not found in the DOM; skipping listener.');
+}
+
+const addCustomFieldBtn = document.getElementById('add-custom-field-btn');
+if (addCustomFieldBtn) {
+  addCustomFieldBtn.addEventListener('click', () => {
+    addCustomFieldRow('', '');
+  });
+}
+
+// --- Search Event Listeners ---
+
+function handleSearchClick() {
+  const q = profileSearchInput ? profileSearchInput.value.trim() : '';
+  profileSearchQuery = q;
+  renderProfileList();
+}
+
+function handleSearchReset() {
+  if (profileSearchInput) {
+    profileSearchInput.value = '';
+  }
+  profileSearchQuery = '';
+  renderProfileList();
+}
+
+if (profileSearchBtn) {
+  profileSearchBtn.addEventListener('click', handleSearchClick);
+}
+
+if (profileSearchInput) {
+  profileSearchInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      handleSearchClick();
+    } else if (e.key === 'Escape') {
+      handleSearchReset();
+    }
+  });
+
+  profileSearchInput.addEventListener('input', () => {
+    profileSearchQuery = profileSearchInput.value;
+    renderProfileList();
+  });
+}
+
+if (profileSearchClearBtn) {
+  profileSearchClearBtn.addEventListener('click', handleSearchReset);
+}
+
+if (profileSearchResetLink) {
+  profileSearchResetLink.addEventListener('click', handleSearchReset);
+}
+
+// --- Data Backup & Transfer Handlers ---
+
+function downloadJsonFile(filename, data) {
+  const jsonStr = JSON.stringify(data, null, 2);
+  const blob = new Blob([jsonStr], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
+if (exportJsonBtn) {
+  exportJsonBtn.addEventListener('click', () => {
+    const active = profiles.find((p) => p.id === selectedProfileId);
+    if (!active) {
+      setFormStatus('No profile selected to export.', 'error');
+      return;
+    }
+    const safeName = (active.name || 'profile').toLowerCase().replace(/[^a-z0-9]/gi, '_');
+    downloadJsonFile(`${safeName}_profile.json`, active);
+    setFormStatus(`Exported "${active.name}" as JSON file.`, 'success');
+  });
+}
+
+if (backupAllBtn) {
+  backupAllBtn.addEventListener('click', () => {
+    if (!profiles || profiles.length === 0) {
+      setImportStatus('No profiles to backup yet.', 'error');
+      return;
+    }
+    const backupData = {
+      app: 'BD Job Autofill',
+      version: '1.5.0',
+      exportedAt: new Date().toISOString(),
+      count: profiles.length,
+      profiles: profiles
+    };
+    const dateStr = new Date().toISOString().slice(0, 10);
+    downloadJsonFile(`bd_job_autofill_profiles_backup_${dateStr}.json`, backupData);
+    setImportStatus(`Successfully backed up ${profiles.length} profiles!`, 'success');
+  });
+}
+
+if (importJsonInput) {
+  importJsonInput.addEventListener('change', () => {
+    const file = importJsonInput.files && importJsonInput.files[0];
+    pendingImportFile = file || null;
+    if (importJsonBtn) {
+      importJsonBtn.disabled = !file;
+    }
+    if (file) {
+      setImportStatus(`Selected: ${file.name}`, '');
+    } else {
+      setImportStatus('', '');
+    }
+  });
+}
+
+if (importJsonBtn) {
+  importJsonBtn.addEventListener('click', async () => {
+    if (!pendingImportFile) {
+      setImportStatus('Please select a JSON file first.', 'error');
+      return;
+    }
+
+    try {
+      importJsonBtn.disabled = true;
+      setImportStatus('Reading and validating JSON file...', '');
+
+      const text = await pendingImportFile.text();
+      const parsed = JSON.parse(text);
+
+      let importedList = [];
+      if (Array.isArray(parsed)) {
+        importedList = parsed;
+      } else if (parsed && Array.isArray(parsed.profiles)) {
+        importedList = parsed.profiles;
+      } else if (parsed && typeof parsed === 'object') {
+        importedList = [parsed];
+      } else {
+        throw new Error('Invalid JSON format: expected a profile object or an array of profiles.');
+      }
+
+      if (importedList.length === 0) {
+        throw new Error('No profile records found in the JSON file.');
+      }
+
+      let saveCount = 0;
+      for (const item of importedList) {
+        if (!item || typeof item !== 'object') continue;
+        const profileToSave = { ...item };
+        if (!profileToSave.id) {
+          profileToSave.id = generateProfileId();
+        }
+        if (!profileToSave.name) {
+          profileToSave.name = profileToSave.fullName || 'Imported Profile';
+        }
+        // Normalize marital status to Single
+        if (profileToSave.maritalStatus && profileToSave.maritalStatus.toLowerCase() === 'unmarried') {
+          profileToSave.maritalStatus = 'Single';
+        }
+
+        await sendMessage('SAVE_PROFILE', profileToSave);
+        saveCount++;
+      }
+
+      profiles = await sendMessage('GET_PROFILES');
+      renderProfileList();
+      setImportStatus(`Successfully imported ${saveCount} profile(s)!`, 'success');
+      importJsonInput.value = '';
+      pendingImportFile = null;
+      importJsonBtn.disabled = true;
+    } catch (err) {
+      setImportStatus(`Import failed: ${err.message}`, 'error');
+      if (importJsonBtn) importJsonBtn.disabled = false;
+    }
+  });
+}
+
+if (copyFromProfileBtn) {
+  copyFromProfileBtn.addEventListener('click', () => {
+    const sourceId = copyFromProfileSelect.value;
+    if (!sourceId) {
+      setImportStatus('Please select a profile to copy.', 'error');
+      return;
+    }
+    const source = profiles.find((p) => p.id === sourceId);
+    if (!source) {
+      setImportStatus('Selected profile not found.', 'error');
+      return;
+    }
+
+    const cloned = JSON.parse(JSON.stringify(source));
+    delete cloned.id;
+    cloned.name = `${source.name || 'Profile'} (Copy)`;
+    if (cloned.maritalStatus && cloned.maritalStatus.toLowerCase() === 'unmarried') {
+      cloned.maritalStatus = 'Single';
+    }
+
+    selectedProfileId = null;
+    formEmptyHintEl.hidden = true;
+    profileFormEl.hidden = false;
+    if (deleteProfileBtn) deleteProfileBtn.hidden = true;
+    if (deleteProfileTopBtn) deleteProfileTopBtn.hidden = true;
+    if (editorHeadingEl) editorHeadingEl.textContent = `Create New Profile (Copy of ${source.name || 'Profile'})`;
+    setFormStatus(`Copied details from "${source.name}". Edit and click "Save Profile" to save as new.`, 'success');
+    populateForm(cloned);
+    renderProfileList();
+    const nameField = document.getElementById('field-name');
+    if (nameField) nameField.focus();
+  });
+}
+
+// --- Sample Profile event listeners ---
+
+const loadSampleBtn = document.getElementById('load-sample-btn');
+const showSampleJsonBtn = document.getElementById('show-sample-json-btn');
+const sampleJsonDisplay = document.getElementById('sample-json-display');
+
+if (loadSampleBtn) {
+  loadSampleBtn.addEventListener('click', () => {
+    const sample = getSampleProfileData();
+    selectedProfileId = null;
+    formEmptyHintEl.hidden = true;
+    profileFormEl.hidden = false;
+    deleteProfileBtn.hidden = true;
+    setFormStatus('Sample profile loaded. You can edit and save.', 'success');
+    populateForm(sample);
+    renderProfileList();
+    const sameCheckbox = document.getElementById('field-sameAsPresent');
+    if (sameCheckbox) {
+      sameCheckbox.checked = true;
+      sameCheckbox.dispatchEvent(new Event('change'));
+    }
+  });
+}
+
+if (showSampleJsonBtn) {
+  showSampleJsonBtn.addEventListener('click', () => {
+    if (sampleJsonDisplay.style.display === 'none') {
+      const sample = getSampleProfileData();
+      sampleJsonDisplay.textContent = JSON.stringify(sample, null, 2);
+      sampleJsonDisplay.style.display = 'block';
+      showSampleJsonBtn.textContent = 'Hide Sample JSON';
+    } else {
+      sampleJsonDisplay.style.display = 'none';
+      showSampleJsonBtn.textContent = 'Show Sample JSON';
+    }
+  });
+}
+
+// ----- CV Import: fully offline PDF extraction (no network, no API key) -----
+//
+// PDF text is extracted locally using the vendored PDF.js build at
+// lib/pdfjs/pdf.min.js (worker at lib/pdfjs/pdf.worker.min.js). Field values
+// are then derived from that text with regex/keyword pattern matching in
+// extractFieldsFromText(). If a PDF has no embedded text layer (e.g. a
+// scanned/image-only form), each page is rendered to a canvas and OCR'd
+// locally via the vendored Tesseract.js build at lib/tesseract/ (English +
+// Bangla trained data, also vendored). Nothing in this section ever leaves
+// the browser.
+
+const cvStatusEl = document.getElementById('cv-status');
+const cvFileInput = document.getElementById('cv-file-input');
+const extractCvBtn = document.getElementById('extract-cv-btn');
+
+/**
+ * Lazily configures the vendored PDF.js worker. Safe to call repeatedly.
+ */
+function ensurePdfJsConfigured() {
+  if (typeof pdfjsLib === 'undefined') {
+    throw new Error(
+      'PDF.js is not loaded. Make sure lib/pdfjs/pdf.min.js is included ' +
+      'before profiles.js and lib/pdfjs/pdf.worker.min.js is listed in ' +
+      'web_accessible_resources in manifest.json.'
+    );
+  }
+  if (!pdfjsLib.GlobalWorkerOptions.workerSrc) {
+    pdfjsLib.GlobalWorkerOptions.workerSrc = chrome.runtime.getURL('lib/pdfjs/pdf.worker.min.js');
+  }
+}
+
+/**
+ * Checks that the vendored Tesseract.js build is loaded. Actual worker
+ * creation happens lazily in runOcrOnPdf() since it's only needed when a
+ * PDF has no extractable text layer.
+ */
+function ensureTesseractAvailable() {
+  if (typeof Tesseract === 'undefined') {
+    throw new Error(
+      'Tesseract.js is not loaded. Make sure lib/tesseract/tesseract.min.js ' +
+      'is included before profiles.js and the lib/tesseract/ assets are ' +
+      'listed in web_accessible_resources in manifest.json.'
+    );
+  }
+}
+
+/** Set status for CV import area */
+function setCvStatus(message, tone) {
+  cvStatusEl.textContent = message;
+  cvStatusEl.className = 'form-status';
+  if (tone) {
+    cvStatusEl.classList.add(`form-status--${tone}`);
+  }
+}
+
+/** Enable/disable extract button based on file presence only (no API key needed) */
+function updateExtractButton() {
+  if (!cvFileInput || !extractCvBtn) return;
+  const hasFile = cvFileInput.files && cvFileInput.files.length > 0;
+  extractCvBtn.disabled = !hasFile;
+}
+
+if (cvFileInput) cvFileInput.addEventListener('change', updateExtractButton);
+
+/** Read a File as an ArrayBuffer, for local PDF.js parsing. */
+function readFileAsArrayBuffer(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = reject;
+    reader.readAsArrayBuffer(file);
+  });
+}
+
+/**
+ * Groups raw OCR word boxes into visual rows by y-position, filtering out
+ * low-confidence/stray border-line characters. Shared by the flat
+ * label:value reconstruction below and the multi-column table parsers
+ * (address block, education table) further down, which need row/column
+ * structure rather than a flattened string.
+ * @param {Array<{text:string, bbox:{x0:number,y0:number,x1:number,y1:number}, confidence:number}>} words
+ * @returns {Array<{yc:number, words: Array<{text:string,x0:number,x1:number,y0:number,y1:number,yc:number}>}>}
+ */
+function groupWordsIntoRows(words) {
+  // Table cell borders are frequently misread by Tesseract as tiny stray
+  // characters ("A", "H", a lone ":") sitting right at column boundaries —
+  // e.g. "Gender : : Male" or "Applicant's Name A MD. HABIBUR RAHMAN".
+  // These are near-always low-confidence single-character guesses, so we
+  // drop them here rather than trying to patch every downstream regex.
+  const CONFIDENCE_FLOOR = 40;
+  const items = (words || [])
+    .filter((w) => w.text && w.text.trim())
+    .filter((w) => w.confidence === undefined || w.confidence >= CONFIDENCE_FLOOR)
+    .filter((w) => !/^[:;|.,]{1,2}$/.test(w.text.trim()))
+    .map((w) => ({
+      text: w.text.trim(),
+      x0: w.bbox.x0,
+      x1: w.bbox.x1,
+      y0: w.bbox.y0,
+      y1: w.bbox.y1,
+      yc: (w.bbox.y0 + w.bbox.y1) / 2,
+    }));
+
+  if (items.length === 0) return [];
+
+  const heights = items.map((it) => it.y1 - it.y0).sort((a, b) => a - b);
+  const medianHeight = heights[Math.floor(heights.length / 2)] || 20;
+  const Y_TOL = Math.max(8, medianHeight * 0.6);
+
+  items.sort((a, b) => a.yc - b.yc);
+  const rows = [];
+  for (const it of items) {
+    const row = rows[rows.length - 1];
+    if (row && Math.abs(row.yc - it.yc) <= Y_TOL) {
+      row.words.push(it);
+      row.yc = (row.yc * (row.words.length - 1) + it.yc) / row.words.length;
+    } else {
+      rows.push({ yc: it.yc, words: [it] });
+    }
+  }
+  for (const row of rows) row.words.sort((a, b) => a.x0 - b.x0);
+  return rows;
+}
+
+/**
+ * Turns row-grouped words into "Label : Value" text lines by splitting each
+ * row at its single widest x-gap. Good enough for simple 2-column forms;
+ * genuine multi-column tables (3+ columns) need the specialized parsers
+ * below instead, since a single gap can't disambiguate more than 2 columns.
+ * @param {ReturnType<typeof groupWordsIntoRows>} rows
+ * @param {number} pageWidth
+ * @returns {string}
+ */
+function rowsToLines(rows, pageWidth) {
+  const GAP_THRESHOLD = pageWidth * 0.025;
+  const lines = [];
+  for (const row of rows) {
+    let maxGap = 0;
+    let splitIdx = -1;
+    for (let i = 1; i < row.words.length; i++) {
+      const gap = row.words[i].x0 - row.words[i - 1].x1;
+      if (gap > maxGap) {
+        maxGap = gap;
+        splitIdx = i;
+      }
+    }
+    if (splitIdx > 0 && maxGap > GAP_THRESHOLD) {
+      const label = row.words.slice(0, splitIdx).map((w) => w.text).join(' ');
+      let valueWords = row.words.slice(splitIdx);
+      // Safety net: even after confidence filtering, a stray single-char
+      // border misread can slip through (e.g. no confidence field at all).
+      // A real value is never a lone 1-character token followed by more
+      // words, so drop it if that shape shows up.
+      if (valueWords.length > 1 && valueWords[0].text.length === 1) {
+        valueWords = valueWords.slice(1);
+      }
+      const value = valueWords.map((w) => w.text).join(' ');
+      lines.push(`${label} : ${value}`);
+    } else {
+      lines.push(row.words.map((w) => w.text).join(' '));
+    }
+  }
+  return lines.join('\n');
+}
+
+/**
+ * Reconstructs "Label : Value" text lines from raw OCR word boxes, instead
+ * of relying on Tesseract's default reading order. This matters for
+ * two-column table forms (e.g. government application receipts where the
+ * left column holds labels and the right column holds values) — Tesseract's
+ * default text output reads such tables column-by-column ("Name of the
+ * Post\nUser Id\n...\nMD. HABIBUR RAHMAN\n..."), which breaks every
+ * label/value regex in extractFieldsFromText(). Grouping words into rows by
+ * y-position and splitting each row into columns at its widest x-gap
+ * restores the label-adjacent-to-value layout the regexes expect.
+ * @param {Array<{text:string, bbox:{x0:number,y0:number,x1:number,y1:number}, confidence:number}>} words
+ * @param {number} pageWidth
+ * @returns {string}
+ */
+function reconstructRowsFromWords(words, pageWidth) {
+  return rowsToLines(groupWordsIntoRows(words), pageWidth);
+}
+
+/**
+ * Parses the side-by-side "Present Address / Permanent Address" block.
+ * A single-gap split can't handle this (it's 2 label:value pairs sitting
+ * next to each other per row), so instead we anchor a column boundary at
+ * the "Permanent" header word and bucket every subsequent address-block
+ * word left/right of it, then apply the normal sub-label regexes
+ * (Care Of / Vill.../ District / Upazila/P.S. / Post Office / Post Code)
+ * independently to each half.
+ * @param {ReturnType<typeof groupWordsIntoRows>} rows
+ * @returns {object} partial profile data (only fields that were found)
+ */
+function extractAddressTableFromRows(rows) {
+  const out = {};
+  const headerIdx = rows.findIndex((r) => {
+    const t = r.words.map((w) => w.text).join(' ');
+    return /present\s*address/i.test(t) && /permanent\s*address/i.test(t);
+  });
+  if (headerIdx === -1) return out;
+
+  const headerRow = rows[headerIdx];
+  const permWordIdx = headerRow.words.findIndex((w) => /^permanent$/i.test(w.text));
+  if (permWordIdx <= 0) return out;
+  const boundaryX =
+    headerRow.words[permWordIdx].x0 -
+    (headerRow.words[permWordIdx].x0 - headerRow.words[permWordIdx - 1].x1) / 2;
+
+  const addrRowRegex = /^(Care\s*Of|Vill|House|District|Upazila|Post\s*Office|Post\s*Code)/i;
+  const subLabelPatterns = [
+    ['district', /^District\s*[:\-]?\s*(.+)/i],
+    ['upazila', /Upazila[^A-Za-z]*(?:P\.?S\.?)?\s*[:\-]?\s*(.+)/i],
+    ['post', /Post\s*Office\s*[:\-]?\s*(.+)/i],
+    ['postcode', /Post\s*Code\s*[:\-]?\s*(.+)/i],
+    ['address', /(?:Vill\/?\s*Road\/?)(?:\s*House\/?\s*Flat)?\s*[:\-]?\s*(.+)/i],
+    ['careOf', /Care\s*Of\s*[:\-]?\s*(.+)/i],
+  ];
+
+  const present = {};
+  const permanent = {};
+  for (let i = headerIdx + 1; i < rows.length; i++) {
+    const row = rows[i];
+    const rowText = row.words.map((w) => w.text).join(' ');
+    if (/educat|examination/i.test(rowText)) break; // left the address block
+    if (!addrRowRegex.test(rowText)) continue;
+
+    const leftText = row.words.filter((w) => w.x0 < boundaryX).map((w) => w.text).join(' ');
+    const rightText = row.words.filter((w) => w.x0 >= boundaryX).map((w) => w.text).join(' ');
+    for (const [key, pat] of subLabelPatterns) {
+      const lm = leftText.match(pat);
+      if (lm && lm[1] && lm[1].trim() && !present[key]) present[key] = lm[1].trim();
+      const rm = rightText.match(pat);
+      if (rm && rm[1] && rm[1].trim() && !permanent[key]) permanent[key] = rm[1].trim();
+    }
+  }
+
+  if (present.address) out.presentAddress = present.address;
+  if (present.district) out.presentDistrict = present.district;
+  if (present.upazila) out.presentUpazila = present.upazila;
+  if (present.post) out.presentPost = present.post;
+  if (present.postcode) out.presentPostcode = present.postcode;
+  if (permanent.address) out.permanentAddress = permanent.address;
+  if (permanent.district) out.permanentDistrict = permanent.district;
+  if (permanent.upazila) out.permanentUpazila = permanent.upazila;
+  if (permanent.post) out.permanentPost = permanent.post;
+  if (permanent.postcode) out.permanentPostcode = permanent.postcode;
+
+  return out;
+}
+
+/**
+ * Parses the Educational Info table (Examination | Board/University | Roll
+ * | Result | Group/Subject | Year | Duration). This is a genuine N-column
+ * table, so column boundaries are anchored from the header row's word
+ * x-positions (midpoints between consecutive header words), and every data
+ * row's words are bucketed into whichever column boundary they fall inside.
+ * @param {ReturnType<typeof groupWordsIntoRows>} rows
+ * @returns {object} partial profile data (only fields that were found)
+ */
+function extractEducationTableFromRows(rows) {
+  const out = {};
+  const headerIdx = rows.findIndex((r) => {
+    const t = r.words.map((w) => w.text).join(' ');
+    return /examination/i.test(t) && /roll/i.test(t) && /result/i.test(t);
+  });
+  if (headerIdx === -1) return out;
+
+  const headerWords = rows[headerIdx].words;
+  // Column boundary = midpoint between each header word and the next.
+  const boundaries = [];
+  for (let i = 1; i < headerWords.length; i++) {
+    boundaries.push((headerWords[i - 1].x1 + headerWords[i].x0) / 2);
+  }
+  const colNames = headerWords.map((w) => w.text.toLowerCase());
+
+  function bucketRow(row) {
+    const cells = colNames.map(() => []);
+    for (const w of row.words) {
+      let col = 0;
+      while (col < boundaries.length && w.x0 >= boundaries[col]) col++;
+      if (cells[col]) cells[col].push(w.text);
+    }
+    const cellFor = (matcher) => {
+      const idx = colNames.findIndex(matcher);
+      return idx >= 0 ? cells[idx].join(' ').trim() : '';
+    };
+    return {
+      exam: cells[0] ? cells[0].join(' ').trim() : '',
+      board: cellFor((c) => c.includes('board') || c.includes('university')),
+      roll: cellFor((c) => c.includes('roll')),
+      result: cellFor((c) => c.includes('result')),
+      group: cellFor((c) => c.includes('group') || c.includes('subject')),
+      year: cellFor((c) => c.includes('year')),
+      duration: cellFor((c) => c.includes('duration')),
+    };
+  }
+
+  const examRowMap = [
+    [/^s\.?\s*s\.?\s*c\.?$/i, 'ssc'],
+    [/^h\.?\s*s\.?\s*c\.?$/i, 'hsc'],
+    [/^honou?rs$/i, 'gra'],
+    [/^(?:b\.?\s*sc\.?|b\.?\s*a\.?|b\.?\s*b\.?\s*a\.?|bachelor)/i, 'gra'],
+    [/^m\.?\s*sc\.?$/i, 'mas'],
+    [/^(?:m\.?\s*a\.?|m\.?\s*b\.?\s*a\.?|master)/i, 'mas'],
+  ];
+
+  for (let i = headerIdx + 1; i < rows.length; i++) {
+    const row = rows[i];
+    const firstWord = row.words[0] ? row.words[0].text : '';
+    if (/other\s*qualif|declare|signature/i.test(row.words.map((w) => w.text).join(' '))) break;
+    const match = examRowMap.find(([re]) => re.test(firstWord));
+    if (!match) continue;
+    const prefix = match[1];
+    const cell = bucketRow(row);
+
+    const resultMatch = cell.result.match(/(\d\.\d{1,2})/);
+    const yearMatch = cell.year.match(/(\d{4})/);
+    // Guard against Result-column overflow ("CGPA 3.43 (Out of 4)") leaking
+    // into the Group/Subject bucket when a cell's text runs wide — strip
+    // filler words and parentheses before picking the subject/group name.
+    const cleanedGroupText = cell.group
+      .replace(/\b(?:of|out|in|on|cgpa|gpa)\b/gi, '')
+      .replace(/[()0-9.]/g, '')
+      .trim();
+    const groupMatch = cleanedGroupText.match(/([A-Za-z]{3,30})/);
+
+    if (cell.board) out[`${prefix}Board`] = cell.board.replace(/\s*\/\s*/g, '/');
+    if (cell.roll && /^\d{2,10}$/.test(cell.roll)) out[`${prefix}Roll`] = cell.roll;
+    if (resultMatch) out[`${prefix}Result`] = resultMatch[1];
+    if (groupMatch) out[`${prefix}Group`] = groupMatch[1];
+    if (yearMatch) out[`${prefix}Year`] = yearMatch[1];
+    if (cell.duration && /^\d{1,2}$/.test(cell.duration)) out[`${prefix}Duration`] = cell.duration;
+    // gra/mas also have an "institute"/"subject" naming in the profile
+    // schema (Board/University header serves double duty as institute name
+    // for Honors/Masters rows; Group/Subject serves double duty as subject).
+    if (prefix === 'gra' || prefix === 'mas') {
+      if (cell.board) out[`${prefix}Institute`] = cell.board;
+      if (groupMatch) out[`${prefix}Subject`] = groupMatch[1];
+    }
+  }
+
+  return out;
+}
+
+/**
+ * Renders every page of a PDF to an offscreen canvas and runs local OCR
+ * (Tesseract.js, English + Bangla) on each page image. Used as a fallback
+ * when a PDF has no embedded text layer (e.g. a scanned/image-only form).
+ * Entirely local — model files are vendored, no network requests are made.
+ * @param {File} file
+ * @param {(status: string) => void} [onProgress] optional progress callback
+ * @returns {Promise<string>}
+ */
+async function extractTextFromPdfViaOcr(file, onProgress) {
+  ensurePdfJsConfigured();
+  ensureTesseractAvailable();
+
+  const arrayBuffer = await readFileAsArrayBuffer(file);
+  const loadingTask = pdfjsLib.getDocument({ data: arrayBuffer });
+  const pdf = await loadingTask.promise;
+
+  const worker = await Tesseract.createWorker('eng+ben', 1, {
+    workerPath: chrome.runtime.getURL('lib/tesseract/worker.min.js'),
+    corePath: chrome.runtime.getURL('lib/tesseract/tesseract-core-lstm.wasm.js'),
+    langPath: chrome.runtime.getURL('lib/tesseract/lang-data'),
+    gzip: true,
+    // IMPORTANT: Tesseract.js defaults to wrapping workerPath in a Blob
+    // (workerBlobURL: true) and creating the worker from a blob: URL. That
+    // blob-origin worker then tries to importScripts() our
+    // chrome-extension://.../worker.min.js URL, which Chrome blocks
+    // cross-origin ("Failed to execute 'importScripts' ... failed to
+    // load"). Setting this to false makes Tesseract instantiate the worker
+    // directly from workerPath instead, which is allowed since the file is
+    // declared in web_accessible_resources.
+    workerBlobURL: false,
+    logger: (msg) => {
+      if (onProgress && msg.status) {
+        onProgress(msg.status + (msg.progress ? ` (${Math.round(msg.progress * 100)}%)` : ''));
+      }
+    },
+  });
+
+  try {
+    const pageTexts = [];
+    const pageCanvases = [];
+    const allWords = [];
+    let tableFields = {};
+    // Render at a higher scale than 1:1 for noticeably better OCR accuracy
+    // on small form text.
+    const RENDER_SCALE = 2;
+
+    for (let pageNum = 1; pageNum <= pdf.numPages; pageNum++) {
+      if (onProgress) onProgress(`Rendering page ${pageNum} of ${pdf.numPages}`);
+      const page = await pdf.getPage(pageNum);
+      const viewport = page.getViewport({ scale: RENDER_SCALE });
+
+      const canvas = document.createElement('canvas');
+      canvas.width = viewport.width;
+      canvas.height = viewport.height;
+      const ctx = canvas.getContext('2d');
+
+      await page.render({ canvasContext: ctx, viewport }).promise;
+      pageCanvases.push(canvas);
+
+      if (onProgress) onProgress(`Reading page ${pageNum} of ${pdf.numPages}`);
+      const { data } = await worker.recognize(canvas);
+
+      // Prefer position-aware row reconstruction (handles two-column table
+      // forms correctly). Fall back to Tesseract's raw text if word boxes
+      // are unavailable for some reason.
+      const words = data.words && data.words.length ? data.words : null;
+      if (words) allWords.push(words);
+      const rows = words ? groupWordsIntoRows(words) : [];
+      const reconstructed = rows.length ? rowsToLines(rows, canvas.width) : '';
+
+      pageTexts.push(reconstructed || data.text || '');
+
+      // Genuine multi-column tables (Present/Permanent address block,
+      // Educational Info table) can't be captured by the flat 2-column
+      // reconstruction above, so parse them separately per page and merge
+      // in whatever they find.
+      if (rows.length) {
+        tableFields = {
+          ...extractAddressTableFromRows(rows),
+          ...extractEducationTableFromRows(rows),
+          ...tableFields,
+        };
+      }
+    }
+
+    return { text: pageTexts.join('\n'), tableFields, pageCanvases, allWords, pdf };
+  } finally {
+    await worker.terminate();
+  }
+}
+
+/**
+ * Extracts all text content from a PDF file, entirely locally via PDF.js.
+ * Also returns the loaded PDF document handle for embedded image extraction.
+ * @param {File} file
+ * @returns {Promise<{text: string, pdf: any}>}
+ */
+async function extractTextFromPdf(file) {
+  ensurePdfJsConfigured();
+  const arrayBuffer = await readFileAsArrayBuffer(file);
+  const loadingTask = pdfjsLib.getDocument({ data: arrayBuffer });
+  let pdf;
+  try {
+    pdf = await loadingTask.promise;
+  } catch (err) {
+    throw new Error(
+      'Could not open this PDF (' +
+        (err && (err.message || err.name) ? err.message || err.name : 'unknown PDF.js error') +
+        '). It may be corrupted, password-protected, or not a valid PDF.'
+    );
+  }
+
+  const pageTexts = [];
+  for (let pageNum = 1; pageNum <= pdf.numPages; pageNum++) {
+    const page = await pdf.getPage(pageNum);
+    const textContent = await page.getTextContent();
+    // Join items with spaces; PDF.js splits text into positioned fragments
+    // that don't include natural whitespace between them.
+    const pageText = textContent.items.map((item) => item.str).join(' ');
+    pageTexts.push(pageText);
+  }
+  return { text: pageTexts.join('\n'), pdf };
+}
+
+/**
+ * Runs a list of regex patterns against the CV text in order, returning the
+ * first non-empty capture group match, trimmed. Patterns are tried in order
+ * so more specific/labelled patterns should come first.
+ * @param {string} text
+ * @param {RegExp[]} patterns
+ * @returns {string|null}
+ */
+function firstMatch(text, patterns) {
+  for (const pattern of patterns) {
+    const match = text.match(pattern);
+    if (match && match[1] && match[1].trim()) {
+      return match[1]
+        .trim()
+        .replace(/\s{2,}/g, ' ')
+        .replace(/^[,;:]+|[,;:]+$/g, '')
+        .trim();
+    }
+  }
+  return null;
+}
+
+/**
+ * Normalizes a matched date string into YYYY-MM-DD where possible.
+ * Accepts DD/MM/YYYY, DD-MM-YYYY, "20 December 1994", "December 20, 1994".
+ * @param {string} raw
+ * @returns {string|null}
+ */
+function normalizeDate(raw) {
+  if (!raw) return null;
+  const s = raw.trim();
+
+  // Already ISO
+  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
+
+  // DD/MM/YYYY or DD-MM-YYYY
+  let m = s.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{4})$/);
+  if (m) {
+    const [, d, mo, y] = m;
+    return `${y}-${mo.padStart(2, '0')}-${d.padStart(2, '0')}`;
+  }
+
+  // "20 December 1994" or "20 Dec 1994"
+  const months = {
+    jan: '01', feb: '02', mar: '03', apr: '04', may: '05', jun: '06',
+    jul: '07', aug: '08', sep: '09', oct: '10', nov: '11', dec: '12'
+  };
+  m = s.match(/^(\d{1,2})\s+([A-Za-z]{3,})\s+(\d{4})$/);
+  if (m) {
+    const mon = months[m[2].slice(0, 3).toLowerCase()];
+    if (mon) return `${m[3]}-${mon}-${m[1].padStart(2, '0')}`;
+  }
+
+  // "20-Dec-1994" (hyphenated day-month name-year)
+  m = s.match(/^(\d{1,2})-([A-Za-z]{3,})-(\d{4})$/);
+  if (m) {
+    const mon = months[m[2].slice(0, 3).toLowerCase()];
+    if (mon) return `${m[3]}-${mon}-${m[1].padStart(2, '0')}`;
+  }
+
+  // "December 20, 1994" or "December 20 1994"
+  m = s.match(/^([A-Za-z]{3,})\s+(\d{1,2}),?\s+(\d{4})$/);
+  if (m) {
+    const mon = months[m[1].slice(0, 3).toLowerCase()];
+    if (mon) return `${m[3]}-${mon}-${m[2].padStart(2, '0')}`;
+  }
+
+  return null; // leave unparsed dates unset rather than guessing wrong
+}
+
+/**
+ * Extracts profile field values from raw CV text using regex/keyword
+ * pattern matching. Entirely local — no network calls. Field labels are
+ * matched loosely (case-insensitive, optional colon, flexible spacing) to
+ * accommodate varied CV formatting.
+ * @param {string} text
+ * @returns {object} partial profile data, only fields that were found
+ */
+function extractFieldsFromText(text) {
+  // Normalize whitespace/newlines into single spaces for label matching,
+  // but keep an original-lines version for name/first-line heuristics.
+  const flat = text.replace(/\r/g, '').replace(/[ \t]+/g, ' ');
+  const lines = text.split('\n').map((l) => l.trim()).filter(Boolean);
+
+  const data = {};
+
+  // --- Full name: prefer an explicit "Name:" label, else first non-empty line ---
+  data.fullName = firstMatch(flat, [
+    /(?:Applicant'?s?|Candidate'?s?)\s*Name\s*[:\-]\s*([A-Za-z.,' 	]{3,60})(?:\n|$)/i,
+    /(?:^|\n)\s*Name\s*[:\-]\s*([A-Za-z.,' 	]{3,60})(?:\n|$)/i,
+    /(?:^|\n)\s*Full\s*Name\s*[:\-]\s*([A-Za-z.,' 	]{3,60})(?:\n|$)/i
+  ]) || (lines[0] && /^[A-Za-z.\s'-]{3,60}$/.test(lines[0]) ? lines[0] : null);
+
+  data.fatherName = firstMatch(flat, [
+    /Father'?s?\s*Name\s*[:\-]\s*([A-Za-z.,' 	]{3,60})/i
+  ]);
+
+  data.motherName = firstMatch(flat, [
+    /Mother'?s?\s*Name\s*[:\-]\s*([A-Za-z.,' 	]{3,60})/i
+  ]);
+
+  data.spouseName = firstMatch(flat, [
+    /Spouse'?s?\s*Name\s*[:\-]\s*([A-Za-z.,' 	]{3,60})/i,
+    /(?:Husband|Wife)'?s?\s*Name\s*[:\-]\s*([A-Za-z.,' 	]{3,60})/i
+  ]);
+
+  // --- Bangla-script name fields ---
+  // These forms print a Bangla line directly under each English name line
+  // (আবেদনকারীর নাম / পিতার নাম / মাতার নাম). Bangla text lives in the
+  // Unicode block \u0980-\u09FF; capture group allows Bangla letters,
+  // combining marks and spaces. Colons are stripped from the OCR words
+  // upstream, so the pattern doesn't require one.
+  const BN = '\\u0980-\\u09FF';
+  data.nameBn = firstMatch(flat, [
+    new RegExp(`আবেদনকারীর\\s*নাম\\s*[:\\-]?\\s*([${BN}\\s]{3,60})(?:\\n|$)`, 'i')
+  ]);
+  data.fatherBn = firstMatch(flat, [
+    new RegExp(`পিতার\\s*নাম\\s*[:\\-]?\\s*([${BN}\\s]{3,60})(?:\\n|$)`, 'i')
+  ]);
+  data.motherBn = firstMatch(flat, [
+    new RegExp(`মাতার\\s*নাম\\s*[:\\-]?\\s*([${BN}\\s]{3,60})(?:\\n|$)`, 'i')
+  ]);
+
+  // --- Date of birth ---
+  const dobRaw = firstMatch(flat, [
+    /Date\s*of\s*Birth\s*[:\-]\s*([0-9A-Za-z,\/\-\s]{6,25})/i,
+    /D\.?O\.?B\.?\s*[:\-]\s*([0-9A-Za-z,\/\-\s]{6,25})/i,
+    /Birth\s*Date\s*[:\-]\s*([0-9A-Za-z,\/\-\s]{6,25})/i
+  ]);
+  const normalizedDob = normalizeDate(dobRaw);
+  if (normalizedDob) data.dateOfBirth = normalizedDob;
+
+  // --- Gender ---
+  const genderRaw = firstMatch(flat, [
+    /Gender\s*[:\-]\s*(Male|Female|Other)/i,
+    /Sex\s*[:\-]\s*(Male|Female|Other)/i
+  ]);
+  if (genderRaw) {
+    data.gender = genderRaw[0].toUpperCase() + genderRaw.slice(1).toLowerCase();
+  }
+
+  // --- Nationality ---
+  data.nationality = firstMatch(flat, [
+    /Nationality\s*[:\-]\s*([A-Za-z 	]{4,30})/i
+  ]) || 'Bangladeshi';
+
+  // --- Religion ---
+  data.religion = firstMatch(flat, [
+    /Religion\s*[:\-]\s*([A-Za-z 	]{3,20})/i
+  ]);
+
+  // --- Marital status ---
+  const maritalRaw = firstMatch(flat, [
+    /Marital\s*Status\s*[:\-]\s*(Married|Unmarried|Single|Divorced|Widowed)/i
+  ]);
+  if (maritalRaw) {
+    const normalized = /single|unmarried/i.test(maritalRaw) ? 'Single' : maritalRaw;
+    data.maritalStatus = normalized[0].toUpperCase() + normalized.slice(1).toLowerCase();
+  }
+
+  // --- Blood group ---
+  data.bloodGroup = firstMatch(flat, [
+    /Blood\s*Group\s*[:\-]\s*(A\+|A-|B\+|B-|AB\+|AB-|O\+|O-)/i
+  ]);
+
+  // --- NID / birth reg / passport ---
+  data.nidNo = firstMatch(flat, [
+    /N\.?I\.?D\.?\s*(?:No\.?|Number)?\s*[:\-]\s*([0-9]{10,17})/i,
+    /National\s*ID\s*(?:No\.?)?\s*[:\-]\s*([0-9]{10,17})/i
+  ]);
+  if (data.nidNo) data.nidType = 'NID';
+
+  data.birthRegNo = firstMatch(flat, [
+    /Birth\s*Reg(?:istration)?\.?\s*(?:No\.?)?\s*[:\-]\s*([0-9]{10,20})/i
+  ]);
+
+  data.passportNo = firstMatch(flat, [
+    /Passport\s*(?:No\.?|Number|ID)?\s*[:\-]\s*([A-Z0-9]{6,12})/i
+  ]);
+  // Some forms print "Passport ID : N/A" with no real number — don't keep a
+  // literal "N/A" as if it were a value.
+  if (data.passportNo && /^n\W*a$/i.test(data.passportNo)) data.passportNo = null;
+
+  // --- Contact info ---
+  const mobile = firstMatch(flat, [
+    /(?:Mobile|Phone|Cell|Contact)\s*(?:No\.?|Number)?\s*[:\-]\s*(\+?88)?(01[3-9]\d{8})/i,
+    /(01[3-9]\d{8})/
+  ]) || firstMatch(flat, [/(\+?880\s?1[3-9]\d{8})/]);
+  if (mobile) {
+    const digitsOnly = mobile.replace(/\D/g, '').replace(/^880/, '0');
+    data.mobile = digitsOnly;
+    data.mobileConfirm = digitsOnly;
+  }
+
+  data.email = firstMatch(flat, [
+    /([A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,})/
+  ]);
+
+  // --- Address blocks ---
+  data.presentAddress = firstMatch(flat, [
+    /Present\s*Address\s*[:\-]\s*([^\n]{5,120})/i
+  ]);
+  data.permanentAddress = firstMatch(flat, [
+    /Permanent\s*Address\s*[:\-]\s*([^\n]{5,120})/i
+  ]);
+  data.presentDistrict = firstMatch(flat, [
+    /Present\s*(?:Address\s*)?District\s*[:\-]\s*([A-Za-z\s]{3,30})/i
+  ]);
+  data.permanentDistrict = firstMatch(flat, [
+    /Permanent\s*(?:Address\s*)?District\s*[:\-]\s*([A-Za-z\s]{3,30})/i
+  ]);
+  data.presentPostcode = firstMatch(flat, [
+    /Present\s*(?:Address\s*)?Post\s*[- ]?Code\s*[:\-]\s*(\d{4})/i
+  ]);
+  data.permanentPostcode = firstMatch(flat, [
+    /Permanent\s*(?:Address\s*)?Post\s*[- ]?Code\s*[:\-]\s*(\d{4})/i
+  ]);
+
+  data.fatherOccupation = firstMatch(flat, [
+    /Father'?s?\s*Occupation\s*[:\-]\s*([A-Za-z 	]{3,40})/i
+  ]);
+
+  // --- SSC ---
+  data.sscBoard = firstMatch(flat, [/S\.?S\.?C\.?[^\n]*Board\s*[:\-]\s*([A-Za-z 	]{3,20})/i]);
+  data.sscYear = firstMatch(flat, [/S\.?S\.?C\.?[^\n]*(?:Year|Passing)\s*[:\-]\s*(\d{4})/i, /S\.?S\.?C\.?[^\n]{0,80}(?<!\d)((?:19|20)\d{2})(?!\d)/i]);
+  data.sscResult = firstMatch(flat, [/S\.?S\.?C\.?[^\n]*(?:GPA|Result|CGPA)\s*[:\-]\s*(\d\.\d{1,2})/i]);
+  data.sscRoll = firstMatch(flat, [/S\.?S\.?C\.?[^\n]*Roll\s*(?:No\.?)?\s*[:\-]\s*(\d{4,8})/i]);
+  data.sscGroup = firstMatch(flat, [/S\.?S\.?C\.?[^\n]*Group\s*[:\-]\s*(Science|Commerce|Arts|Humanities)/i]);
+
+  // --- HSC ---
+  data.hscBoard = firstMatch(flat, [/H\.?S\.?C\.?[^\n]*Board\s*[:\-]\s*([A-Za-z 	]{3,20})/i]);
+  data.hscYear = firstMatch(flat, [/H\.?S\.?C\.?[^\n]*(?:Year|Passing)\s*[:\-]\s*(\d{4})/i, /H\.?S\.?C\.?[^\n]{0,80}(?<!\d)((?:19|20)\d{2})(?!\d)/i]);
+  data.hscResult = firstMatch(flat, [/H\.?S\.?C\.?[^\n]*(?:GPA|Result|CGPA)\s*[:\-]\s*(\d\.\d{1,2})/i]);
+  data.hscRoll = firstMatch(flat, [/H\.?S\.?C\.?[^\n]*Roll\s*(?:No\.?)?\s*[:\-]\s*(\d{4,8})/i]);
+  data.hscGroup = firstMatch(flat, [/H\.?S\.?C\.?[^\n]*Group\s*[:\-]\s*(Science|Commerce|Arts|Humanities)/i]);
+
+  // --- Graduation / Bachelor's ---
+  data.graInstitute = firstMatch(flat, [
+    /(?:B\.?Sc\.?|B\.?A\.?|B\.?B\.?A\.?|Bachelor)[^\n]*(?:from|,)\s*([A-Za-z\s]{5,60}(?:University|College|Institute))/i,
+    /Bachelor'?s?[^\n]*Institut(?:e|ion)\s*[:\-]\s*([A-Za-z\s]{5,60})/i
+  ]);
+  data.graSubject = firstMatch(flat, [
+    /(?:B\.?Sc\.?|Bachelor)[^\n]*in\s+([A-Za-z 	]{3,40})/i
+  ]);
+  data.graYear = firstMatch(flat, [
+    /(?:B\.?Sc\.?|Bachelor)[^\n]{0,60}(\d{4})/i
+  ]);
+  data.graResult = firstMatch(flat, [
+    /(?:B\.?Sc\.?|Bachelor)[^\n]*(?:CGPA|GPA)\s*[:\-]?\s*(\d\.\d{1,2})/i
+  ]);
+
+  // --- Masters ---
+  data.masInstitute = firstMatch(flat, [
+    /(?:M\.?Sc\.?|M\.?A\.?|M\.?B\.?A\.?|Master'?s?)[^\n]*(?:from|,)\s*([A-Za-z\s]{5,60}(?:University|College|Institute))/i
+  ]);
+  data.masSubject = firstMatch(flat, [
+    /(?:M\.?Sc\.?|Master'?s?)[^\n]*in\s+([A-Za-z 	]{3,40})/i
+  ]);
+  data.masYear = firstMatch(flat, [
+    /(?:M\.?Sc\.?|Master'?s?)[^\n]{0,60}(\d{4})/i
+  ]);
+  data.masResult = firstMatch(flat, [
+    /(?:M\.?Sc\.?|Master'?s?)[^\n]*(?:CGPA|GPA)\s*[:\-]?\s*(\d\.\d{1,2})/i
+  ]);
+
+  // --- Skills / experience flags (keyword presence, not labelled fields) ---
+  data.experienceComputer = /computer\s*(?:literate|skills?|experience)/i.test(flat) ? 'Yes' : null;
+  data.experienceSatlipi = /(typing\s*speed|satlipi|words?\s*per\s*minute|wpm)/i.test(flat) ? 'Yes' : null;
+
+  // Strip null/empty values so callers can treat "not present" uniformly.
+  for (const key of Object.keys(data)) {
+    if (data[key] === null || data[key] === undefined || data[key] === '') {
+      delete data[key];
+    }
+  }
+
+  return data;
+}
+
+/**
+ * Safely fetches a PDF.js image object from page.objs or page.commonObjs
+ * @param {object} page PDF.js page proxy
+ * @param {string} objId
+ * @returns {Promise<any>}
+ */
+function getPdfObject(page, objId) {
+  return new Promise((resolve) => {
+    if (!objId) return resolve(null);
+    try {
+      if (page.objs && typeof page.objs.get === 'function') {
+        page.objs.get(objId, (obj) => {
+          if (obj) return resolve(obj);
+          if (page.commonObjs && typeof page.commonObjs.get === 'function') {
+            page.commonObjs.get(objId, resolve);
+          } else {
+            resolve(null);
+          }
+        });
+      } else if (page.commonObjs && typeof page.commonObjs.get === 'function') {
+        page.commonObjs.get(objId, resolve);
+      } else {
+        resolve(null);
+      }
+    } catch (e) {
+      resolve(null);
+    }
+  });
+}
+
+/**
+ * Converts a PDF.js image object or data dictionary to an HTMLCanvasElement
+ * @param {any} obj
+ * @returns {HTMLCanvasElement|null}
+ */
+function imageObjToCanvas(obj) {
+  if (!obj) return null;
+  const w = obj.width || (obj.data && obj.width);
+  const h = obj.height || (obj.data && obj.height);
+  if (!w || !h) return null;
+
+  const canvas = document.createElement('canvas');
+  canvas.width = w;
+  canvas.height = h;
+  const ctx = canvas.getContext('2d');
+
+  if (typeof ImageBitmap !== 'undefined' && obj instanceof ImageBitmap) {
+    ctx.drawImage(obj, 0, 0);
+    return canvas;
+  }
+  if (obj instanceof HTMLImageElement || obj instanceof HTMLCanvasElement) {
+    ctx.drawImage(obj, 0, 0);
+    return canvas;
+  }
+
+  if (obj.data) {
+    const imgData = ctx.createImageData(w, h);
+    const src = obj.data;
+    const dst = imgData.data;
+    if (src.length === w * h * 4) {
+      dst.set(src);
+    } else if (src.length === w * h * 3) {
+      for (let i = 0, j = 0; i < src.length; i += 3, j += 4) {
+        dst[j] = src[i];
+        dst[j + 1] = src[i + 1];
+        dst[j + 2] = src[i + 2];
+        dst[j + 3] = 255;
+      }
+    } else if (src.length === w * h) {
+      for (let i = 0, j = 0; i < src.length; i++, j += 4) {
+        dst[j] = src[i];
+        dst[j + 1] = src[i];
+        dst[j + 2] = src[i];
+        dst[j + 3] = 255;
+      }
+    }
+    ctx.putImageData(imgData, 0, 0);
+    return canvas;
+  }
+  return null;
+}
+
+/**
+ * Checks if a canvas contains meaningful non-uniform visual image content
+ * (avoids mistaking empty white background or solid color blocks for photos).
+ * @param {HTMLCanvasElement} canvas
+ * @param {number} [minVariance]
+ * @returns {boolean}
+ */
+function hasImageContent(canvas, minVariance = 12) {
+  if (!canvas || canvas.width < 30 || canvas.height < 30) return false;
+  try {
+    const ctx = canvas.getContext('2d');
+    const d = ctx.getImageData(0, 0, canvas.width, canvas.height).data;
+    let sum = 0, sumSq = 0, count = 0;
+    const step = Math.max(1, Math.floor(d.length / 4000));
+    for (let i = 0; i < d.length; i += step * 4) {
+      const lum = 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
+      sum += lum;
+      sumSq += lum * lum;
+      count++;
+    }
+    if (count === 0) return false;
+    const mean = sum / count;
+    const variance = Math.sqrt(Math.max(0, sumSq / count - mean * mean));
+    return variance >= minVariance;
+  } catch (e) {
+    return false;
+  }
+}
+
+/**
+ * Checks if a canvas contains dark ink strokes (signature)
+ * @param {HTMLCanvasElement} canvas
+ * @param {number} [threshold]
+ * @param {number} [minDarkPixels]
+ * @returns {boolean}
+ */
+function hasSignatureInk(canvas, threshold = 210, minDarkPixels = 40) {
+  if (!canvas || canvas.width < 40 || canvas.height < 15) return false;
+  try {
+    const ctx = canvas.getContext('2d');
+    const d = ctx.getImageData(0, 0, canvas.width, canvas.height).data;
+    let darkPixels = 0;
+    for (let i = 0; i < d.length; i += 4) {
+      const lum = 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
+      if (lum < threshold) {
+        darkPixels++;
+        if (darkPixels >= minDarkPixels) return true;
+      }
+    }
+    return false;
+  } catch (e) {
+    return false;
+  }
+}
+
+/**
+ * Crops the photo region from a document canvas.
+ * In Bangladeshi application forms and CVs, the photo is typically in the
+ * top-right quadrant (x: 56%-95%, y: 4%-34%).
+ * @param {HTMLCanvasElement} canvas
+ * @returns {HTMLCanvasElement|null}
+ */
+function cropPhotoFromCanvas(canvas) {
+  const w = canvas.width;
+  const h = canvas.height;
+  const rx = Math.round(w * 0.56);
+  const ry = Math.round(h * 0.04);
+  const rw = Math.round(w * 0.38);
+  const rh = Math.round(h * 0.30);
+
+  const ctx = canvas.getContext('2d');
+  const imgData = ctx.getImageData(rx, ry, rw, rh);
+  const d = imgData.data;
+
+  // Background sample from top-left corner of the quadrant
+  const bgR = d[0], bgG = d[1], bgB = d[2];
+  let minX = rw, minY = rh, maxX = -1, maxY = -1;
+  let nonBgCount = 0;
+
+  for (let y = 0; y < rh; y++) {
+    for (let x = 0; x < rw; x++) {
+      const idx = (y * rw + x) * 4;
+      const diff = Math.abs(d[idx] - bgR) + Math.abs(d[idx + 1] - bgG) + Math.abs(d[idx + 2] - bgB);
+      if (diff > 35) {
+        nonBgCount++;
+        if (x < minX) minX = x;
+        if (x > maxX) maxX = x;
+        if (y < minY) minY = y;
+        if (y > maxY) maxY = y;
+      }
+    }
+  }
+
+  // If a distinct bounded photo was detected
+  if (nonBgCount > 400 && maxX > minX + 40 && maxY > minY + 40) {
+    const cropW = maxX - minX + 1;
+    const cropH = maxY - minY + 1;
+    const cropCanvas = document.createElement('canvas');
+    cropCanvas.width = cropW;
+    cropCanvas.height = cropH;
+    cropCanvas.getContext('2d').drawImage(
+      canvas,
+      rx + minX, ry + minY, cropW, cropH,
+      0, 0, cropW, cropH
+    );
+    if (hasImageContent(cropCanvas, 12)) return cropCanvas;
+  }
+
+  // Fallback to the full top-right candidate area
+  const fallbackCanvas = document.createElement('canvas');
+  fallbackCanvas.width = rw;
+  fallbackCanvas.height = rh;
+  fallbackCanvas.getContext('2d').drawImage(
+    canvas,
+    rx, ry, rw, rh,
+    0, 0, rw, rh
+  );
+  return hasImageContent(fallbackCanvas, 12) ? fallbackCanvas : null;
+}
+
+/**
+ * Crops the signature region from a document canvas using OCR word boxes
+ * or Teletalk's bottom-right signature quadrant.
+ * @param {HTMLCanvasElement} canvas
+ * @param {Array<object>} [words]
+ * @returns {HTMLCanvasElement|null}
+ */
+function cropSignatureFromCanvas(canvas, words = []) {
+  const w = canvas.width;
+  const h = canvas.height;
+
+  let sigWordBox = null;
+  if (words && words.length) {
+    for (const word of words) {
+      const txt = (word.text || '').toLowerCase();
+      if (
+        txt.includes('signature') ||
+        txt.includes('স্বাক্ষর') ||
+        txt.includes('দস্তখত') ||
+        (txt.includes('sign') && !txt.includes('design') && !txt.includes('assign'))
+      ) {
+        if (word.bbox && word.bbox.y0 > h * 0.48) {
+          sigWordBox = word.bbox;
+          break;
+        }
+      }
+    }
+  }
+
+  let cropX, cropY, cropW, cropH;
+  if (sigWordBox) {
+    const labelW = Math.max(70, sigWordBox.x1 - sigWordBox.x0);
+    cropX = Math.max(0, Math.round(sigWordBox.x0 - labelW * 0.4));
+    cropW = Math.min(w - cropX, Math.round(labelW * 2.8));
+    cropH = Math.min(sigWordBox.y0, Math.max(50, Math.round(labelW * 0.9)));
+    cropY = Math.max(0, Math.round(sigWordBox.y0 - cropH - 2));
+  } else {
+    // Standard bottom-right quadrant of Teletalk forms
+    cropX = Math.round(w * 0.50);
+    cropY = Math.round(h * 0.80);
+    cropW = Math.round(w * 0.45);
+    cropH = Math.round(h * 0.16);
+  }
+
+  const cropCanvas = document.createElement('canvas');
+  cropCanvas.width = cropW;
+  cropCanvas.height = cropH;
+  cropCanvas.getContext('2d').drawImage(
+    canvas,
+    cropX, cropY, cropW, cropH,
+    0, 0, cropW, cropH
+  );
+
+  return hasSignatureInk(cropCanvas, 220, 25) ? cropCanvas : null;
+}
+
+/**
+ * Extracts passport photo (300x300px) and signature (300x80px) from a PDF.
+ * Checks embedded XObjects first, then falls back to visual canvas detection.
+ * @param {object} pdf PDF.js document handle
+ * @param {Array<HTMLCanvasElement>} [pageCanvases]
+ * @param {Array<Array<object>>} [wordsList]
+ * @param {(status: string) => void} [onProgress]
+ * @returns {Promise<{photo: object|null, signature: object|null}>}
+ */
+async function extractMediaFromPdf(pdf, pageCanvases = [], wordsList = [], onProgress) {
+  let photo = null;
+  let signature = null;
+
+  if (onProgress) onProgress('Scanning PDF for passport photo & signature...');
+
+  // 1. First attempt: embedded XObjects across pages
+  if (pdf && pdf.numPages) {
+    try {
+      const candidates = [];
+      for (let p = 1; p <= pdf.numPages; p++) {
+        const page = await pdf.getPage(p);
+        const ops = await page.getOperatorList();
+        const fnArray = ops.fnArray;
+        const argsArray = ops.argsArray;
+
+        for (let i = 0; i < fnArray.length; i++) {
+          const fn = fnArray[i];
+          if (fn === pdfjsLib.OPS.paintImageXObject || fn === pdfjsLib.OPS.paintInlineImageXObject) {
+            const objId = argsArray[i][0];
+            try {
+              const rawObj = await getPdfObject(page, objId);
+              const imgCanvas = imageObjToCanvas(rawObj);
+              if (imgCanvas && imgCanvas.width >= 40 && imgCanvas.height >= 20) {
+                const ratio = imgCanvas.width / imgCanvas.height;
+                candidates.push({
+                  canvas: imgCanvas,
+                  width: imgCanvas.width,
+                  height: imgCanvas.height,
+                  ratio,
+                  pageNum: p,
+                });
+              }
+            } catch (e) {}
+          }
+        }
+      }
+
+      // Identify photo candidate: ~1:1 square
+      const photoCandidates = candidates.filter(
+        (c) => c.ratio >= 0.70 && c.ratio <= 1.45 && c.width >= 70 && c.height >= 70
+      );
+      photoCandidates.sort((a, b) => {
+        const diffA = Math.abs(a.ratio - 1.0);
+        const diffB = Math.abs(b.ratio - 1.0);
+        if (Math.abs(diffA - diffB) > 0.15) return diffA - diffB;
+        return (b.width * b.height) - (a.width * a.height);
+      });
+
+      if (photoCandidates.length > 0 && window.ImageTools) {
+        photo = await window.ImageTools.processPhotoCanvas(photoCandidates[0].canvas, {
+          targetW: 300,
+          targetH: 300,
+          maxKB: 100,
+        });
+      }
+
+      // Identify signature candidate: ~3.75:1 wide rectangle (300/80 = 3.75)
+      const sigCandidates = candidates.filter(
+        (c) => c.ratio >= 1.8 && c.ratio <= 6.5 && c.width >= 90
+      );
+      sigCandidates.sort((a, b) => {
+        const diffA = Math.abs(a.ratio - 3.75);
+        const diffB = Math.abs(b.ratio - 3.75);
+        return diffA - diffB;
+      });
+
+      if (sigCandidates.length > 0 && window.ImageTools) {
+        signature = await window.ImageTools.processSignatureCanvas(sigCandidates[0].canvas, {
+          targetW: 300,
+          targetH: 80,
+          maxKB: 60,
+        });
+      }
+    } catch (xErr) {
+      console.warn('XObject extraction warning:', xErr);
+    }
+  }
+
+  // 2. Fallback: If either media is missing, render page canvases if not already rendered
+  if ((!photo || !signature) && pdf && pdf.numPages) {
+    if (!pageCanvases || pageCanvases.length === 0) {
+      const RENDER_SCALE = 2;
+      try {
+        const p1 = await pdf.getPage(1);
+        const v1 = p1.getViewport({ scale: RENDER_SCALE });
+        const c1 = document.createElement('canvas');
+        c1.width = v1.width;
+        c1.height = v1.height;
+        await p1.render({ canvasContext: c1.getContext('2d'), viewport: v1 }).promise;
+        pageCanvases = [c1];
+
+        if (pdf.numPages > 1) {
+          const pLast = await pdf.getPage(pdf.numPages);
+          const vLast = pLast.getViewport({ scale: RENDER_SCALE });
+          const cLast = document.createElement('canvas');
+          cLast.width = vLast.width;
+          cLast.height = vLast.height;
+          await pLast.render({ canvasContext: cLast.getContext('2d'), viewport: vLast }).promise;
+          pageCanvases.push(cLast);
+        }
+      } catch (rErr) {
+        console.warn('Canvas rendering for media extraction warning:', rErr);
+      }
+    }
+
+    const firstCanvas = pageCanvases[0];
+    const lastCanvas = pageCanvases[pageCanvases.length - 1];
+
+    if (!photo && firstCanvas && window.ImageTools) {
+      try {
+        const crop = cropPhotoFromCanvas(firstCanvas);
+        if (crop) {
+          photo = await window.ImageTools.processPhotoCanvas(crop, {
+            targetW: 300,
+            targetH: 300,
+            maxKB: 100,
+          });
+        }
+      } catch (e) {
+        console.warn('Visual photo detection error:', e);
+      }
+    }
+
+    if (!signature && lastCanvas && window.ImageTools) {
+      try {
+        const allWords = (wordsList || []).flat();
+        const crop = cropSignatureFromCanvas(lastCanvas, allWords);
+        if (crop) {
+          signature = await window.ImageTools.processSignatureCanvas(crop, {
+            targetW: 300,
+            targetH: 80,
+            maxKB: 60,
+          });
+        }
+      } catch (e) {
+        console.warn('Visual signature detection error:', e);
+      }
+    }
+  }
+
+  return { photo, signature };
+}
+
+/**
+ * Extracts form fields, passport photo, and signature from an uploaded image file
+ * @param {File} file
+ * @param {(status: string) => void} [onProgress]
+ * @returns {Promise<{fields: object, photo: object|null, signature: object|null}>}
+ */
+async function extractFromImage(file, onProgress) {
+  ensureTesseractAvailable();
+  if (onProgress) onProgress('Loading document image...');
+  const img = await window.ImageTools.loadImage(file);
+  const w = img.naturalWidth || img.width;
+  const h = img.naturalHeight || img.height;
+  const canvas = window.ImageTools.toCanvas(img, w, h);
+
+  if (onProgress) onProgress('Reading text via local OCR...');
+  const worker = await Tesseract.createWorker('eng+ben', 1, {
+    workerPath: chrome.runtime.getURL('lib/tesseract/worker.min.js'),
+    corePath: chrome.runtime.getURL('lib/tesseract/tesseract-core-lstm.wasm.js'),
+    langPath: chrome.runtime.getURL('lib/tesseract/lang-data'),
+    gzip: true,
+    workerBlobURL: false,
+    logger: (msg) => {
+      if (onProgress && msg.status) {
+        onProgress(msg.status + (msg.progress ? ` (${Math.round(msg.progress * 100)}%)` : ''));
+      }
+    },
+  });
+
+  let words = [];
+  let reconstructed = '';
+  let tableFields = {};
+  try {
+    const { data } = await worker.recognize(canvas);
+    words = data.words && data.words.length ? data.words : [];
+    const rows = words.length ? groupWordsIntoRows(words) : [];
+    reconstructed = rows.length ? rowsToLines(rows, canvas.width) : (data.text || '');
+    if (rows.length) {
+      tableFields = {
+        ...extractAddressTableFromRows(rows),
+        ...extractEducationTableFromRows(rows),
+      };
+    }
+  } finally {
+    await worker.terminate();
+  }
+
+  const regexFields = extractFieldsFromText(reconstructed);
+  const fields = { ...regexFields, ...tableFields };
+
+  if (onProgress) onProgress('Detecting photo and signature...');
+  let photo = null;
+  let signature = null;
+
+  try {
+    const pCrop = cropPhotoFromCanvas(canvas);
+    if (pCrop && window.ImageTools) {
+      photo = await window.ImageTools.processPhotoCanvas(pCrop, {
+        targetW: 300,
+        targetH: 300,
+        maxKB: 100,
+      });
+    }
+  } catch (e) {
+    console.warn('Photo extraction from image failed:', e);
+  }
+
+  try {
+    const sCrop = cropSignatureFromCanvas(canvas, words);
+    if (sCrop && window.ImageTools) {
+      signature = await window.ImageTools.processSignatureCanvas(sCrop, {
+        targetW: 300,
+        targetH: 80,
+        maxKB: 60,
+      });
+    }
+  } catch (e) {
+    console.warn('Signature extraction from image failed:', e);
+  }
+
+  return { fields, photo, signature };
+}
+
+/**
+ * Runs the full offline extraction pipeline: parse PDF or document image locally,
+ * pattern-match it into profile fields, and automatically extract:
+ *   - Passport photo: 300 × 300 px, <= 100 KB
+ *   - Signature: 300 × 80 px (W 300px, H 80px), <= 60 KB
+ *
+ * @param {File} file
+ * @param {(status: string) => void} [onProgress] optional progress callback
+ * @returns {Promise<{fields: object, photo: object|null, signature: object|null}>}
+ */
+async function extractCvData(file, onProgress) {
+  const isImage = file.type.startsWith('image/') || /\.(png|jpe?g|webp)$/i.test(file.name);
+  if (isImage) {
+    return extractFromImage(file, onProgress);
+  }
+
+  // PDF processing
+  const { text: rawText, pdf } = await extractTextFromPdf(file);
+  let text = rawText;
+  let tableFields = {};
+  let pageCanvases = [];
+  let wordsList = [];
+
+  if (!text || text.trim().length < 40) {
+    if (onProgress) onProgress('No text layer found — running local OCR');
+    const ocrResult = await extractTextFromPdfViaOcr(file, onProgress);
+    text = ocrResult.text;
+    tableFields = ocrResult.tableFields || {};
+    pageCanvases = ocrResult.pageCanvases || [];
+    wordsList = ocrResult.allWords || [];
+  }
+
+  if (!text || !text.trim()) {
+    throw new Error('No extractable text found in this PDF, even after OCR. The scan quality may be too low to read.');
+  }
+
+  const regexFields = extractFieldsFromText(text);
+  const fields = { ...regexFields, ...tableFields };
+
+  // Automated extraction of passport photo (300x300) and signature (300x80)
+  const { photo, signature } = await extractMediaFromPdf(pdf, pageCanvases, wordsList, onProgress);
+
+  return { fields, photo, signature };
+}
+
+/** Populate the profile form with extracted data */
+function populateFormWithExtracted(extractedData) {
+  // Ensure profile has an ID
+  if (!profileIdInput.value) {
+    profileIdInput.value = generateProfileId();
+  }
+
+  // Initialize Photo & Signature capture tools for this profile
+  if (typeof window !== 'undefined' && window.ProfileCapture) {
+    window.ProfileCapture.initPhotoCapture('#photoInput', '#photoPreview', profileIdInput.value);
+    window.ProfileCapture.initSignatureCapture('#sigInput', '#sigPreview', profileIdInput.value);
+  }
+
+  // For each text field, set value if present
+  for (const key of TEXT_FIELD_KEYS) {
+    const input = document.getElementById(`field-${key}`);
+    if (input && extractedData[key] !== undefined && extractedData[key] !== null) {
+      input.value = extractedData[key];
+    }
+  }
+  // Checkboxes
+  for (const key of CHECKBOX_FIELD_KEYS) {
+    const input = document.getElementById(`field-${key}`);
+    if (input && extractedData[key] !== undefined) {
+      input.checked = Boolean(extractedData[key]);
+      // If sameAsPresent is checked, trigger change to copy fields
+      if (key === 'sameAsPresent' && input.checked) {
+        input.dispatchEvent(new Event('change'));
+      }
+    }
+  }
+  // If we have a fullName but no name, set name to the first word of fullName as a label
+  if (extractedData.fullName && !document.getElementById('field-name').value) {
+    const name = extractedData.fullName.split(' ')[0] || 'Profile';
+    document.getElementById('field-name').value = name;
+  }
+  // Optionally set gender, nationality defaults
+  if (!document.getElementById('field-nationality').value) {
+    document.getElementById('field-nationality').value = 'Bangladeshi';
+  }
+  // Trigger any dependent logic (e.g., sameAsPresent)
+  const sameCheckbox = document.getElementById('field-sameAsPresent');
+  if (sameCheckbox.checked) {
+    sameCheckbox.dispatchEvent(new Event('change'));
+  }
+  // Show form if hidden
+  if (profileFormEl.hidden) {
+    formEmptyHintEl.hidden = true;
+    profileFormEl.hidden = false;
+    deleteProfileBtn.hidden = true; // new unsaved profile
+  }
+}
+
+/** Main handler for Extract button */
+async function handleExtractCv() {
+  const file = cvFileInput.files[0];
+  if (!file) {
+    setCvStatus('Please select a file.', 'error');
+    return;
+  }
+  const isPdf = file.type === 'application/pdf' || /\.pdf$/i.test(file.name);
+  const isImage = file.type.startsWith('image/') || /\.(png|jpe?g|webp)$/i.test(file.name);
+  if (!isPdf && !isImage) {
+    setCvStatus('Please select a PDF or Image file (JPEG/PNG/WebP).', 'error');
+    return;
+  }
+
+  extractCvBtn.disabled = true;
+  setCvStatus('Extracting data, photo & signature offline... please wait.', '');
+  try {
+    const { fields, photo, signature } = await extractCvData(file, (status) => setCvStatus(status, ''));
+    populateFormWithExtracted(fields);
+
+    const activeProfileId = profileIdInput.value;
+    const mediaList = [];
+
+    if (photo && photo.base64 && window.ProfileCapture) {
+      await window.ProfileCapture.saveProfilePhoto(activeProfileId, photo);
+      mediaList.push(`Passport Photo (300×300px, ${photo.kb} KB)`);
+    }
+
+    if (signature && signature.base64 && window.ProfileCapture) {
+      await window.ProfileCapture.saveProfileSignature(activeProfileId, signature);
+      mediaList.push(`Signature (300×80px, ${signature.kb} KB)`);
+    }
+
+    if (window.ProfileCapture && window.ProfileCapture.refreshPreviews) {
+      await window.ProfileCapture.refreshPreviews(activeProfileId);
+    }
+
+    const foundCount = Object.keys(fields).length;
+    let successMsg = `Extracted ${foundCount} field(s) offline.`;
+    if (mediaList.length > 0) {
+      successMsg += ` Captured ${mediaList.join(' & ')}.`;
+    }
+    successMsg += ` Review and click "Save Profile".`;
+    setCvStatus(successMsg, 'success');
+
+    // Scroll to form
+    profileFormEl.scrollIntoView({ behavior: 'smooth' });
+  } catch (err) {
+    const message =
+      (err && typeof err.message === 'string' && err.message) ||
+      (typeof err === 'string' && err) ||
+      (err && err.name) ||
+      'Unknown error while extracting the document. See console for details.';
+    console.error('CV/Document extraction failed:', err);
+    setCvStatus('Error: ' + message, 'error');
+  } finally {
+    extractCvBtn.disabled = false;
+  }
+}
+
+if (extractCvBtn) extractCvBtn.addEventListener('click', handleExtractCv);
+
+if (cvFileInput && extractCvBtn) updateExtractButton();
+
+// Initialize the page
+initialize();

@@ -1,0 +1,8 @@
+{
+  "name": "BD Job Autofill",
+  "description": "Autofill Bangladeshi job application forms (Teletalk-style) from saved profiles with automated 300x300 photo crop, 300x80 signature scanner, and mobile SMS sync for fee payments.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

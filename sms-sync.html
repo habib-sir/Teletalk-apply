@@ -1,0 +1,249 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>16222 Direct SMS Composer &amp; Live Feed - BD Job Autofill</title>
+  <link rel="stylesheet" href="sms-sync.css" />
+</head>
+<body>
+  <div class="sms-page">
+
+    <!-- Page Header -->
+    <header class="sms-header">
+      <div>
+        <h1 class="sms-header__title">
+          <span>📱</span> 16222 Teletalk SMS Gateway &amp; Live Sync
+        </h1>
+        <p class="sms-header__subtitle">
+          Send job application fee SMS directly to 16222 via Teletalk SIM and view live reply PINs &amp; confirmation credentials.
+        </p>
+      </div>
+      <div style="display: flex; gap: 8px; align-items: center; flex-wrap: wrap;">
+        <div id="server-status-pill" class="server-status-pill" title="Click to view/change server configuration">
+          <span id="server-status-dot" class="server-status-dot"></span>
+          <span id="server-status-text">Checking Gateway...</span>
+        </div>
+        <button id="refresh-state-btn" class="btn btn-secondary" style="font-size: 12px; padding: 6px 12px;" type="button">
+          <span>🔄</span> Refresh Status
+        </button>
+      </div>
+    </header>
+
+    <!-- Two-Section Layout: Composer (Left) & Inbox Feed (Right) -->
+    <div class="sms-layout sms-layout--two-col">
+
+      <!-- SECTION 1: 16222 Direct SMS Composer (Send from Phone) -->
+      <section class="card composer-card" id="composer-card">
+        <div class="card-title">
+          <div class="card-title-left">
+            <span>✉️</span>
+            <span>16222 Direct SMS Composer (Send from Phone)</span>
+          </div>
+          <span class="step-badge" id="composer-badge" style="background:#eff6ff; color:#1d4ed8;">Teletalk 16222</span>
+        </div>
+
+        <div style="display: flex; flex-direction: column; gap: 14px;">
+          
+          <!-- Helper: Load from Saved Application -->
+          <div class="saved-app-loader">
+            <label class="input-label" for="select-saved-app" style="margin-bottom: 4px; display: flex; justify-content: space-between;">
+              <span>📁 Quick Load from Saved Application:</span>
+              <span style="font-weight: normal; color: var(--color-text-muted); font-size: 11px;">Optional</span>
+            </label>
+            <select id="select-saved-app" class="input-field" style="font-size: 12px; padding: 6px 10px;">
+              <option value="">-- Choose an application to auto-fill SMS --</option>
+            </select>
+          </div>
+
+          <!-- Recipient & Body Inputs -->
+          <div class="form-grid-composer">
+            <div style="width: 140px;">
+              <label class="input-label" for="custom-recipient">Send To:</label>
+              <input type="text" id="custom-recipient" class="input-field" value="16222" style="font-weight: 700; font-family: monospace; font-size: 14px; text-align: center;" />
+            </div>
+            <div style="flex: 1; min-width: 200px;">
+              <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px;">
+                <label class="input-label" for="custom-body" style="margin: 0;">SMS Message Body:</label>
+                <span id="char-counter" style="font-size: 11px; color: var(--color-text-muted);">0 chars • 1 SMS</span>
+              </div>
+              <textarea id="custom-body" class="input-field" rows="3" placeholder="e.g. BPSC 7A8B9C or BPSC YES 12345678" style="font-family: monospace; font-size: 13px; font-weight: 600; line-height: 1.4;"></textarea>
+            </div>
+          </div>
+
+          <!-- Quick Template Chips -->
+          <div>
+            <div style="font-size: 11px; color: var(--color-text-muted); font-weight: 600; margin-bottom: 6px;">
+              ⚡ Quick Formats (Click to insert):
+            </div>
+            <div style="display: flex; gap: 6px; align-items: center; flex-wrap: wrap;">
+              <button id="chip-1st-sms" type="button" class="btn btn-secondary btn-sm" style="font-size: 11px; padding: 3px 9px;">
+                1st SMS: BPSC [USER_ID]
+              </button>
+              <button id="chip-2nd-sms" type="button" class="btn btn-secondary btn-sm" style="font-size: 11px; padding: 3px 9px;">
+                2nd Confirmation: BPSC YES [PIN]
+              </button>
+              <button id="chip-help-sms" type="button" class="btn btn-secondary btn-sm" style="font-size: 11px; padding: 3px 9px;">
+                16222 HELP
+              </button>
+            </div>
+          </div>
+
+          <!-- Primary Action Buttons -->
+          <div style="display: flex; flex-direction: column; gap: 8px; margin-top: 4px;">
+            <div style="display: flex; gap: 8px; align-items: center; flex-wrap: wrap;">
+              <button id="send-custom-sms-btn" class="btn btn-primary" type="button" style="padding: 9px 20px; font-weight: 700; font-size: 13px; display: flex; align-items: center; gap: 6px; box-shadow: 0 2px 4px rgba(2,132,199,0.25);">
+                <span>📲</span>
+                <span>Send from Phone Now</span>
+              </button>
+              <button id="copy-custom-sms-btn" class="btn btn-secondary" type="button" style="padding: 9px 14px; font-size: 12px; font-weight: 600;">
+                <span>📋</span> Copy Text
+              </button>
+              <a id="open-sms-app-link" href="sms:16222" class="btn btn-secondary" style="padding: 9px 14px; font-size: 12px; font-weight: 600; text-decoration: none; display: inline-flex; align-items: center; gap: 4px;">
+                <span>📱</span> Open SMS App
+              </a>
+              <button id="toggle-qr-btn" class="btn btn-secondary btn-sm" type="button" style="padding: 9px 12px; font-size: 12px; margin-left: auto;">
+                <span>📷</span> Scan QR
+              </button>
+            </div>
+
+            <!-- Instant QR Code Panel (Toggleable) -->
+            <div id="composer-qr-panel" style="display: none; background: #f8fafc; border: 1px dashed var(--color-border); border-radius: 8px; padding: 12px; margin-top: 8px;">
+              <div style="display: flex; gap: 14px; align-items: center;">
+                <div id="composer-qr-container" style="background: #fff; padding: 6px; border: 1px solid var(--color-border); border-radius: 6px; width: 100px; height: 100px; display: flex; align-items: center; justify-content: center;">
+                  <canvas id="composer-qr-canvas" width="90" height="90"></canvas>
+                </div>
+                <div style="font-size: 12px; color: var(--color-text);">
+                  <strong>Scan with Phone Camera:</strong>
+                  <p style="margin: 4px 0 0 0; color: var(--color-text-muted); font-size: 11px; line-height: 1.4;">
+                    Point your Android camera or Google Lens at this QR code. Tap the prompt to open your phone's SMS app with this message pre-filled, then press Send on your Teletalk SIM!
+                  </p>
+                </div>
+              </div>
+            </div>
+
+            <!-- Status Feedback Alert -->
+            <div id="custom-sms-status" style="display: none; padding: 8px 12px; border-radius: 6px; font-size: 12px; font-weight: 600;"></div>
+          </div>
+
+          <!-- Phone App Pairing Panel -->
+          <div class="gateway-config-bar" style="background:#eff6ff; border: 1px solid #bfdbfe;">
+            <div class="card-title-left" style="margin-bottom: 8px;">
+              <span>📱</span>
+              <span style="font-weight: 700; font-size: 13px;">Connect Your Phone App (BD Job SMS Gateway)</span>
+            </div>
+            <p style="margin: 0 0 10px 0; font-size: 11px; color: var(--color-text-muted);">
+              Open the <strong>BD Job SMS Gateway</strong> app on your phone and enter these two values, then toggle it ON.
+            </p>
+
+            <div style="display:flex; flex-direction:column; gap:8px;">
+              <div>
+                <label class="input-label" style="font-size: 11px;">Gateway Server URL (type this into the app):</label>
+                <div style="display:flex; gap:6px;">
+                  <input type="text" id="pairing-server-url" class="input-field" readonly
+                         style="flex:1; font-family: monospace; font-size: 12px; font-weight: 700; background:#fff;" />
+                  <button id="copy-pairing-url-btn" type="button" class="btn btn-secondary btn-sm" style="font-size:11px; padding: 4px 10px;">Copy</button>
+                </div>
+              </div>
+
+              <div>
+                <label class="input-label" style="font-size: 11px;">Pairing Code (type this into the app):</label>
+                <div style="display:flex; gap:6px;">
+                  <input type="text" id="pairing-code" class="input-field" readonly
+                         style="flex:1; font-family: monospace; font-size: 15px; font-weight: 700; letter-spacing: 1px; text-align:center; background:#fff; color:#1d4ed8;" />
+                  <button id="copy-pairing-code-btn" type="button" class="btn btn-secondary btn-sm" style="font-size:11px; padding: 4px 10px;">Copy</button>
+                  <button id="regenerate-pairing-code-btn" type="button" class="btn btn-secondary btn-sm" style="font-size:11px; padding: 4px 10px;" title="Generate a new code (old code stops working)">🔄 New</button>
+                </div>
+              </div>
+
+              <div id="pairing-phone-status" style="font-size: 11px; color: var(--color-text-muted);">
+                Phone status: checking...
+              </div>
+            </div>
+          </div>
+
+          <!-- Advanced Server Connection & Settings Bar (Compact Footer) -->
+          <div class="gateway-config-bar">
+            <div style="display: flex; justify-content: space-between; align-items: center; font-size: 11px; color: var(--color-text-muted);">
+              <span>Gateway: <strong id="current-gateway-label" style="color: var(--color-primary); font-family: monospace;">http://localhost:3000</strong></span>
+              <button id="toggle-server-config-btn" type="button" style="background: none; border: none; color: var(--color-primary); cursor: pointer; text-decoration: underline; padding: 0; font-size: 11px;">
+                ⚙️ Server Settings
+              </button>
+            </div>
+
+            <!-- Expandable Server Configuration -->
+            <div id="server-config-details" style="display: none; margin-top: 8px; padding-top: 8px; border-top: 1px dashed var(--color-border);">
+              <div style="display: flex; gap: 6px; align-items: center; flex-wrap: wrap;">
+                <input type="text" id="custom-server-url-input" class="input-field" placeholder="e.g. http://localhost:3000 or http://192.168.1.5:3000" style="flex: 1; min-width: 180px; font-size: 11px; padding: 4px 8px;" />
+                <button id="save-server-url-btn" type="button" class="btn btn-primary btn-sm" style="font-size: 11px; padding: 4px 10px;">
+                  Save URL
+                </button>
+                <button id="reset-server-url-btn" type="button" class="btn btn-secondary btn-sm" style="font-size: 11px; padding: 4px 10px;">
+                  Reset
+                </button>
+              </div>
+              <p style="margin: 4px 0 0 0; font-size: 10px; color: var(--color-text-muted);">
+                If running in Chrome Extension, the gateway connects to your local Node server at <code>http://localhost:3000</code>.
+              </p>
+            </div>
+          </div>
+
+        </div>
+      </section>
+
+      <!-- SECTION 2: Phone SMS Inbox & 16222 Live Feed -->
+      <section class="card feed-card" id="feed-card">
+        <div class="card-title" style="margin-bottom: 12px;">
+          <div class="card-title-left">
+            <span>💬</span>
+            <span>Phone SMS Inbox &amp; 16222 Live Feed</span>
+          </div>
+          <span id="sms-count-badge" class="step-badge" style="background:#e0f2fe; color:#0369a1;">0 messages</span>
+        </div>
+
+        <!-- Feed Controls: Filters & Search -->
+        <div style="display: flex; flex-direction: column; gap: 8px; margin-bottom: 14px;">
+          <div style="display: flex; gap: 6px; align-items: center; flex-wrap: wrap;">
+            <button id="filter-all-btn" class="btn btn-primary btn-sm" type="button" style="font-size: 11px; padding: 4px 10px;">
+              All Phone SMS
+            </button>
+            <button id="filter-16222-btn" class="btn btn-secondary btn-sm" type="button" style="font-size: 11px; padding: 4px 10px;">
+              16222 Teletalk Only
+            </button>
+            <button id="filter-sent-btn" class="btn btn-secondary btn-sm" type="button" style="font-size: 11px; padding: 4px 10px;">
+              Sent from Phone
+            </button>
+            <button id="refresh-feed-btn" class="btn btn-secondary btn-sm" type="button" style="font-size: 11px; padding: 4px 8px; margin-left: auto;" title="Refresh messages from server">
+              🔄 Refresh
+            </button>
+            <button id="clear-feed-btn" class="btn btn-secondary btn-sm" type="button" style="font-size: 11px; padding: 4px 8px; color: #dc2626;" title="Clear message history">
+              🗑️ Clear
+            </button>
+          </div>
+
+          <div style="position: relative;">
+            <input type="text" id="sms-search-input" class="input-field" placeholder="🔍 Search SMS (by PIN, fee, org, keywords)..." style="font-size: 12px; padding: 6px 10px 6px 28px;" />
+            <span style="position: absolute; left: 9px; top: 7px; font-size: 12px; pointer-events: none; opacity: 0.6;">🔍</span>
+          </div>
+        </div>
+
+        <!-- Messages Stream -->
+        <div id="sms-feed-container" class="sms-thread-container" style="max-height: 520px; overflow-y: auto;">
+          <div style="text-align: center; color: var(--color-text-muted); font-size: 13px; padding: 30px;">
+            Loading SMS messages...
+          </div>
+        </div>
+      </section>
+
+    </div>
+
+  </div>
+
+  <!-- Toast Notification -->
+  <div id="sms-toast" class="sms-toast" style="display: none;"></div>
+
+  <script src="chrome-polyfill.js"></script>
+  <script src="qrcode.min.js"></script>
+  <script src="sms-sync.js"></script>
+</body>
+</html>

@@ -1,0 +1,404 @@
+package com.bdjob.smsgateway;
+
+import android.Manifest;
+import android.content.BroadcastReceiver;
+import android.content.Context;
+import android.content.Intent;
+import android.content.IntentFilter;
+import android.content.SharedPreferences;
+import android.content.pm.PackageManager;
+import android.content.res.ColorStateList;
+import android.net.Uri;
+import android.os.Build;
+import android.os.Bundle;
+import android.os.PowerManager;
+import android.provider.Settings;
+import android.telephony.SubscriptionInfo;
+import android.telephony.SubscriptionManager;
+import android.util.Log;
+import android.view.View;
+import android.widget.ArrayAdapter;
+import android.widget.Button;
+import android.widget.EditText;
+import android.widget.LinearLayout;
+import android.widget.ScrollView;
+import android.widget.Spinner;
+import android.widget.Switch;
+import android.widget.TextView;
+import android.widget.Toast;
+
+import androidx.annotation.NonNull;
+import androidx.appcompat.app.AlertDialog;
+import androidx.appcompat.app.AppCompatActivity;
+import androidx.core.app.ActivityCompat;
+import androidx.core.content.ContextCompat;
+
+import java.text.SimpleDateFormat;
+import java.util.ArrayList;
+import java.util.Date;
+import java.util.List;
+import java.util.Locale;
+
+public class MainActivity extends AppCompatActivity {
+
+    private static final int PERMISSION_REQUEST_CODE = 1001;
+
+    private EditText etServerUrl;
+    private EditText etPairingCode;
+    private Spinner spSimSlot;
+    private Switch swService;
+    private TextView tvStatus;
+    private LinearLayout statusCard;
+    private TextView tvLog;
+    private ScrollView svLog;
+    private Button btnSyncInbox;
+    private Button btnTestSms;
+    private Button btnClearLog;
+
+    private SharedPreferences prefs;
+    private List<Integer> simSubscriptionIds = new ArrayList<>();
+
+    private final BroadcastReceiver logReceiver = new BroadcastReceiver() {
+        @Override
+        public void onReceive(Context context, Intent intent) {
+            String logMsg = intent.getStringExtra("log");
+            if (logMsg != null) {
+                appendLog(logMsg);
+            }
+        }
+    };
+
+    @Override
+    protected void onCreate(Bundle savedInstanceState) {
+        super.onCreate(savedInstanceState);
+        setContentView(R.layout.activity_main);
+
+        // Some OEM skins (notably MIUI) apply "Force Dark" at the OS level
+        // even when our own theme is Light, which washes out explicitly
+        // dark input text into unreadable gray. The theme attribute in
+        // themes.xml handles this on stock Android; this is the same
+        // opt-out applied directly to the window, for phones that only
+        // respect the runtime API.
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            getWindow().getDecorView().setForceDarkAllowed(false);
+        }
+
+        prefs = getSharedPreferences("bd_sms_gateway_prefs", MODE_PRIVATE);
+
+        etServerUrl = findViewById(R.id.et_server_url);
+        etPairingCode = findViewById(R.id.et_pairing_code);
+        // Belt-and-suspenders against OEM force-dark quirks: set these
+        // explicitly in code too, not just in the XML layout.
+        etServerUrl.setTextColor(0xFF0F172A);
+        etServerUrl.setHintTextColor(0xFF64748B);
+        etPairingCode.setTextColor(0xFF0369A1);
+        etPairingCode.setHintTextColor(0xFF64748B);
+        spSimSlot = findViewById(R.id.sp_sim_slot);
+        swService = findViewById(R.id.sw_service);
+        applyPremiumSwitchTint(swService);
+        tvStatus = findViewById(R.id.tv_status);
+        statusCard = findViewById(R.id.status_card);
+        tvLog = findViewById(R.id.tv_log);
+        svLog = findViewById(R.id.sv_log);
+        btnSyncInbox = findViewById(R.id.btn_sync_inbox);
+        btnTestSms = findViewById(R.id.btn_test_sms);
+        btnClearLog = findViewById(R.id.btn_clear_log);
+
+        // Load saved values
+        etServerUrl.setText(prefs.getString("server_url", "http://192.168.10.27:3000"));
+        etPairingCode.setText(prefs.getString("pairing_code", ""));
+
+        checkAndRequestPermissions();
+        loadSimCards();
+        checkBatteryOptimization();
+
+        swService.setOnCheckedChangeListener((buttonView, isChecked) -> {
+            if (isChecked) {
+                startGatewayService();
+            } else {
+                stopGatewayService();
+            }
+        });
+
+        btnSyncInbox.setOnClickListener(v -> syncPhoneInbox());
+        btnTestSms.setOnClickListener(v -> sendTestSms());
+        btnClearLog.setOnClickListener(v -> tvLog.setText(""));
+    }
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        try {
+            IntentFilter filter = new IntentFilter("com.bdjob.smsgateway.LOG_EVENT");
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                registerReceiver(logReceiver, filter, Context.RECEIVER_NOT_EXPORTED);
+            } else {
+                registerReceiver(logReceiver, filter);
+            }
+        } catch (Exception e) {
+            Log.e("MainActivity", "Failed to register logReceiver: " + e.getMessage());
+        }
+        updateStatus();
+    }
+
+    @Override
+    protected void onPause() {
+        super.onPause();
+        try {
+            unregisterReceiver(logReceiver);
+        } catch (Exception ignored) {}
+    }
+
+    /**
+     * The default framework Switch renders as a flat gray toggle, which looks
+     * out of place next to the rest of the app's gradient/glow visual style.
+     * Tint it to match the brand palette: cyan-glow track when ON, quiet
+     * neutral when OFF.
+     */
+    private void applyPremiumSwitchTint(Switch sw) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return;
+
+        int[][] states = new int[][]{
+                new int[]{android.R.attr.state_checked},
+                new int[]{}
+        };
+
+        ColorStateList thumbTint = new ColorStateList(states, new int[]{
+                0xFF0284C7, // ON  — primary
+                0xFFFFFFFF  // OFF — white
+        });
+        ColorStateList trackTint = new ColorStateList(states, new int[]{
+                0xFF7DD3FC, // ON  — soft cyan glow
+                0xFFCBD5E1  // OFF — neutral gray
+        });
+
+        sw.setThumbTintList(thumbTint);
+        sw.setTrackTintList(trackTint);
+    }
+
+    /**
+     * Many phone brands (Xiaomi/MIUI, Oppo, Vivo, Realme, Huawei) aggressively
+     * kill background services to save battery, even foreground services with
+     * a visible notification. If the gateway silently stops working after a
+     * few hours, this is almost always why. Asking the user to exempt the app
+     * from battery optimization keeps the SMS polling loop alive reliably.
+     */
+    private void checkBatteryOptimization() {
+        PowerManager pm = (PowerManager) getSystemService(Context.POWER_SERVICE);
+        if (pm == null || Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return;
+
+        if (!pm.isIgnoringBatteryOptimizations(getPackageName())) {
+            new AlertDialog.Builder(this)
+                    .setTitle("Keep the Gateway Running")
+                    .setMessage("Your phone may stop this app in the background to save battery, " +
+                            "which would break the SMS connection to your PC. " +
+                            "Please allow it to run without restriction.")
+                    .setPositiveButton("Allow", (dialog, which) -> {
+                        try {
+                            Intent intent = new Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS);
+                            intent.setData(Uri.parse("package:" + getPackageName()));
+                            startActivity(intent);
+                        } catch (Exception e) {
+                            appendLog("Could not open battery settings: " + e.getMessage());
+                        }
+                    })
+                    .setNegativeButton("Later", null)
+                    .show();
+        }
+    }
+
+    private void checkAndRequestPermissions() {
+        List<String> permissions = new ArrayList<>();
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.SEND_SMS) != PackageManager.PERMISSION_GRANTED) {
+            permissions.add(Manifest.permission.SEND_SMS);
+        }
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECEIVE_SMS) != PackageManager.PERMISSION_GRANTED) {
+            permissions.add(Manifest.permission.RECEIVE_SMS);
+        }
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.READ_PHONE_STATE) != PackageManager.PERMISSION_GRANTED) {
+            permissions.add(Manifest.permission.READ_PHONE_STATE);
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            if (ContextCompat.checkSelfPermission(this, Manifest.permission.READ_PHONE_NUMBERS) != PackageManager.PERMISSION_GRANTED) {
+                permissions.add(Manifest.permission.READ_PHONE_NUMBERS);
+            }
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            if (ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
+                permissions.add(Manifest.permission.POST_NOTIFICATIONS);
+            }
+        }
+
+        if (!permissions.isEmpty()) {
+            ActivityCompat.requestPermissions(this, permissions.toArray(new String[0]), PERMISSION_REQUEST_CODE);
+        }
+    }
+
+    @Override
+    public void onRequestPermissionsResult(int requestCode, @NonNull String[] permissions, @NonNull int[] grantResults) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults);
+        if (requestCode == PERMISSION_REQUEST_CODE) {
+            try {
+                loadSimCards();
+                appendLog("Permissions updated. SMS access ready.");
+            } catch (Exception e) {
+                Log.e("MainActivity", "Error after permissions: " + e.getMessage());
+            }
+        }
+    }
+
+    private void loadSimCards() {
+        try {
+            if (ActivityCompat.checkSelfPermission(this, Manifest.permission.READ_PHONE_STATE) != PackageManager.PERMISSION_GRANTED) {
+                fallbackSimSlots();
+                return;
+            }
+
+            SubscriptionManager sm = (SubscriptionManager) getSystemService(Context.TELEPHONY_SUBSCRIPTION_SERVICE);
+            if (sm == null) {
+                fallbackSimSlots();
+                return;
+            }
+
+            List<SubscriptionInfo> subList = null;
+            try {
+                subList = sm.getActiveSubscriptionInfoList();
+            } catch (SecurityException se) {
+                Log.w("MainActivity", "ActiveSubscriptionInfoList permission check deferred: " + se.getMessage());
+            }
+
+            List<String> simLabels = new ArrayList<>();
+            simSubscriptionIds.clear();
+
+            if (subList != null && !subList.isEmpty()) {
+                for (SubscriptionInfo info : subList) {
+                    String carrier = info.getCarrierName() != null ? info.getCarrierName().toString() : "SIM " + (info.getSimSlotIndex() + 1);
+                    simLabels.add(carrier + " (Slot " + (info.getSimSlotIndex() + 1) + ")");
+                    simSubscriptionIds.add(info.getSubscriptionId());
+                }
+            } else {
+                fallbackSimSlots();
+                return;
+            }
+
+            ArrayAdapter<String> adapter = new ArrayAdapter<>(this, R.layout.spinner_item, simLabels);
+            adapter.setDropDownViewResource(R.layout.spinner_item);
+            spSimSlot.setAdapter(adapter);
+
+            // Auto-select Teletalk if present
+            for (int i = 0; i < simLabels.size(); i++) {
+                if (simLabels.get(i).toLowerCase().contains("teletalk")) {
+                    spSimSlot.setSelection(i);
+                    break;
+                }
+            }
+        } catch (Exception e) {
+            Log.e("MainActivity", "loadSimCards exception: " + e.getMessage(), e);
+            fallbackSimSlots();
+        }
+    }
+
+    private void fallbackSimSlots() {
+        List<String> simLabels = new ArrayList<>();
+        simSubscriptionIds.clear();
+        simLabels.add("SIM 1 (Teletalk / Default)");
+        simSubscriptionIds.add(-1);
+        simLabels.add("SIM 2");
+        simSubscriptionIds.add(-2);
+        ArrayAdapter<String> adapter = new ArrayAdapter<>(this, R.layout.spinner_item, simLabels);
+        adapter.setDropDownViewResource(R.layout.spinner_item);
+        spSimSlot.setAdapter(adapter);
+    }
+
+    private void startGatewayService() {
+        String url = etServerUrl.getText().toString().trim();
+        String code = etPairingCode.getText().toString().trim();
+
+        if (url.isEmpty()) {
+            Toast.makeText(this, "Please enter the Gateway Server URL", Toast.LENGTH_SHORT).show();
+            swService.setChecked(false);
+            return;
+        }
+
+        // Save preferences
+        int selectedSimSubId = -1;
+        int simPos = spSimSlot.getSelectedItemPosition();
+        if (simPos >= 0 && simPos < simSubscriptionIds.size()) {
+            selectedSimSubId = simSubscriptionIds.get(simPos);
+        }
+
+        prefs.edit()
+                .putString("server_url", url)
+                .putString("pairing_code", code)
+                .putInt("sim_sub_id", selectedSimSubId)
+                .apply();
+
+        Intent serviceIntent = new Intent(this, SmsGatewayService.class);
+        serviceIntent.putExtra("server_url", url);
+        serviceIntent.putExtra("pairing_code", code);
+        serviceIntent.putExtra("sim_sub_id", selectedSimSubId);
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            startForegroundService(serviceIntent);
+        } else {
+            startService(serviceIntent);
+        }
+
+        tvStatus.setText("🟢 Active (Listening for SMS commands from PC)");
+        tvStatus.setTextColor(0xFF15803D);
+        statusCard.setBackgroundResource(R.drawable.bg_status_connected);
+        appendLog("SMS Gateway started. Phone is now connected to Chrome Extension.");
+    }
+
+    private void stopGatewayService() {
+        Intent serviceIntent = new Intent(this, SmsGatewayService.class);
+        stopService(serviceIntent);
+        tvStatus.setText("🔴 Stopped");
+        tvStatus.setTextColor(0xFFB91C1C);
+        statusCard.setBackgroundResource(R.drawable.bg_status_disconnected);
+        appendLog("SMS Gateway stopped.");
+    }
+
+    private void updateStatus() {
+        boolean isRunning = SmsGatewayService.isRunning;
+        swService.setChecked(isRunning);
+        if (isRunning) {
+            tvStatus.setText("🟢 Active (Listening for SMS commands from PC)");
+            tvStatus.setTextColor(0xFF15803D);
+            statusCard.setBackgroundResource(R.drawable.bg_status_connected);
+        } else {
+            tvStatus.setText("🔴 Disconnected (Toggle ON to connect)");
+            tvStatus.setTextColor(0xFFB91C1C);
+            statusCard.setBackgroundResource(R.drawable.bg_status_disconnected);
+        }
+    }
+
+    private void syncPhoneInbox() {
+        Intent serviceIntent = new Intent(this, SmsGatewayService.class);
+        serviceIntent.setAction("ACTION_SYNC_INBOX");
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            startForegroundService(serviceIntent);
+        } else {
+            startService(serviceIntent);
+        }
+        appendLog("Initiating phone SMS inbox sync to PC extension...");
+    }
+
+    private void sendTestSms() {
+        int selectedSimSubId = -1;
+        int simPos = spSimSlot.getSelectedItemPosition();
+        if (simPos >= 0 && simPos < simSubscriptionIds.size()) {
+            selectedSimSubId = simSubscriptionIds.get(simPos);
+        }
+
+        appendLog("Sending manual test ping to 16222 via SIM...");
+        SmsGatewayService.sendSms(this, selectedSimSubId, "16222", "TEST_PING_BDJOB");
+    }
+
+    private void appendLog(String message) {
+        String time = new SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(new Date());
+        String line = "[" + time + "] " + message + "\n";
+        tvLog.append(line);
+        svLog.post(() -> svLog.fullScroll(View.FOCUS_DOWN));
+    }
+}
